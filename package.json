@@ -1,0 +1,9 @@
+{
+  "name": "beacon-cm",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/security.test.mjs",
+    "test:integration": "node scripts/security-smoke.mjs"
+  }
+}

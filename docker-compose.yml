@@ -1,0 +1,20 @@
+services:
+  edgetunnel-secure:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./:/app
+    ports:
+      - "8787:8787"
+    environment:
+      ADMIN: change-me
+      KEY: change-me-key
+      UUID: 90cd4a77-141a-43c9-991b-08263cfe9c10
+      SECURITY_ENABLED: "true"
+      SECURITY_ENDPOINT_SECOND_LIMIT: "100"
+      SECURITY_IP_MINUTE_LIMIT: "1000"
+      SECURITY_PAYLOAD_MAX_BYTES: "1048576"
+      SECURITY_BAN_BASE_SECONDS: "900"
+      SECURITY_BAN_MAX_SECONDS: "86400"
+    command: >
+      sh -lc "npx wrangler@4.59.0 dev --local --ip 0.0.0.0 --port 8787"
