@@ -34,7 +34,7 @@
 
 ## 💡 后台预览
 
-![后台总览](./img/overview.png) ![用户管理](./img/users.png) ![注册管控](./img/registration.png) ![策略配置](./img/config.png) ![审计日志](./img/events.png)
+![后台总览](./img/overview.png) ![用户管理](./img/users.png) ![审计日志](./img/events.png) ![注册管控](./img/registration.png) ![策略配置](./img/config.png) 
 
 ## 💡 快速部署
 >[!TIP]
