@@ -9,7 +9,7 @@
 
 ## 📖 项目简介
 
-**beacon-cm** 是基于 CF Workers/Pages 平台的边缘计算隧道方案，内置完整的安全防护与用户管理体系。在保留原版 edgetunnel 全部核心能力的基础上，新增了：
+**beacon-cm** 是基于 edgetunnel 2.1 VLESS/Trojan 多功能面板[cmliu/edgetunnel](https://github.com/cmliu/edgetunnel)二开，内置完整的安全防护与用户管理体系。在保留原版 edgetunnel 全部核心能力的基础上，新增了：
 
 - 🔐 **统一认证面板**：注册、登录、会话管理一站式解决
 - 🛡️ **订阅风控引擎**：频率限制、IP 扩散检测、无效令牌监控，自动封禁异常账号
