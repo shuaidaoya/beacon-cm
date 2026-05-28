@@ -872,7 +872,7 @@ test('pre-processing allows normal traffic without rate limiting', async () => {
   assert.ok(result?.config);
 });
 
-test('pre-processing allows probe paths without cooldown', async () => {
+test('pre-processing allows probe paths without blocking', async () => {
   const env = createEnv({ SECURITY_NOW_MS: '1710000000000' });
   await enableSecurity(env, {
     thresholds: {
@@ -1088,9 +1088,9 @@ test('injects security admin menu into the original /admin html response', async
   }));
   const output = await injected.text();
 
-  assert.match(output, /安全管理/);
-  assert.match(output, /data-admin-plus-root="true"/);
-  assert.match(output, /admin-plus-fab/);
+  assert.match(output, /admin-plus-status/);
+  assert.match(output, /admin-plus-shell/);
+  assert.match(output, /data-admin-plus-root/);
 });
 
 test('logged-in admin requests bypass rate limiting for backend operations', async () => {

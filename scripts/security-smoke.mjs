@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿import assert from 'node:assert/strict';
+﻿﻿﻿﻿import assert from 'node:assert/strict';
 
 import worker, { __adminPlus } from '../_worker.js';
 
@@ -100,15 +100,15 @@ async function main() {
   const ctx = { waitUntil(promise) { return promise; } };
   const headers = new Headers({ 'X-Client-UUID': user.uuid, 'User-Agent': 'Mozilla/5.0' });
 
-  let cooldownResponse = null;
+  let limitResponse = null;
   for (let i = 0; i < 30; i++) {
     const response = await worker.fetch(createWorkerRequest('https://example.com/public-check?token=bad', { headers }), env, ctx);
     if (response.status === 429) {
-      cooldownResponse = response;
+      limitResponse = response;
       break;
     }
   }
-  assert.equal(cooldownResponse?.status, 429);
+  assert.equal(limitResponse?.status, 429);
 
   env.SECURITY_NOW_MS = String(1710000000000 + 61000);
   const afterExpire = await worker.fetch(createWorkerRequest('https://example.com/public-check?token=bad', { headers }), env, ctx);
@@ -143,7 +143,7 @@ async function main() {
     events.push(JSON.parse(await env.KV.get(item.name)));
   }
   assert.ok(events.some((event) => event.eventType === 'user.registered'));
-  assert.ok(events.some((event) => event.eventType === 'cooldown.created'));
+  assert.ok(events.some((event) => event.eventType === 'limit.created'));
 
   console.log('管理面板联调通过');
 }

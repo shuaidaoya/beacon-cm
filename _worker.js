@@ -128,7 +128,6 @@ const 安全用户索引前缀 = 'sys:user-index:';
 const 安全用户木马索引前缀 = 'sys:user-trojan:';
 const 安全活跃封禁前缀 = 'sys:limit-active:';
 const 安全封禁历史前缀 = 'sys:limit-history:';
-const 安全短暂冷却前缀 = 'sys:cooldown-active:';
 const 安全计数器前缀 = 'sys:counter:';
 const 安全状态前缀 = 'sys:state:';
 const 安全订阅状态前缀 = 'sys:subscription-state:';
@@ -206,6 +205,65 @@ export default {
 		const 当前安全配置 = 安全运行时 ? await 读取安全配置(env, 安全运行时) : 安全标准化配置({}, env);
 		const 当前节点UUID = await 安全解析请求节点UUID(安全运行时, request, url, userID);
 		if (env.GO2SOCKS5) SOCKS5白名单 = await 整理成数组(env.GO2SOCKS5);
+		// TG webhook – MUST be at top, before any other processing
+		if (访问路径 === 'tg-webhook' || 访问路径 === 'tg-webhook/' || 访问路径.startsWith('tg-webhook?')) {
+			if (request.method === 'POST') {
+				try {
+					const body = await request.json();
+					const msg = body.message || body.edited_message;
+					if (msg && msg.text && msg.chat) {
+						const chatId = msg.chat.id;
+						const TG_TXT = await env.KV.get('tg.json');
+						if (TG_TXT) {
+							const TG = JSON.parse(TG_TXT);
+							if (TG.BotToken && String(TG.ChatID || '') === String(chatId)) {
+								const prefix = TG.PanelID ? '[' + TG.PanelID + '] ' : '';
+								const 纯文本 = msg.text.split(/@\w+/)[0];
+								if (!纯文本.startsWith('/')) return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+								// Only admins/owner can use commands
+								if (msg.from && msg.chat.type !== 'private') {
+									try {
+										const memberResp = await fetch('https://api.telegram.org/bot' + TG.BotToken + '/getChatMember?' + new URLSearchParams({ chat_id: chatId, user_id: msg.from.id }));
+										const memberData = await memberResp.json();
+										const status = memberData.ok ? memberData.result?.status : '';
+										if (status !== 'creator' && status !== 'administrator') return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+									} catch(e) {}
+								}
+								// Skip commands meant for the other panel
+								const has2Suffix = /^\/(\w+)2(\s|$)/.test(纯文本);
+								if (TG.PanelID === 'B' && !has2Suffix && /^\/bc/.test(纯文本)) return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+								if (TG.PanelID !== 'B' && has2Suffix && /^\/bc/.test(纯文本)) return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+								const 运行时 = await 创建安全运行时(env);
+								const replyText = await 安全处理TG命令(env, 运行时, 纯文本, String(chatId), TG.PanelID);
+								if (replyText) await fetch('https://api.telegram.org/bot' + TG.BotToken + '/sendMessage?' + new URLSearchParams({ chat_id: chatId, parse_mode: 'HTML', text: prefix + replyText }).toString());
+							}
+						}
+					}
+				} catch(e) {}
+				return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (request.method === 'GET') {
+				const info = { ok: true, url: url.origin + '/tg-webhook' };
+				try {
+					const TG_TXT = await env.KV.get('tg.json');
+					if (TG_TXT) {
+						const TG = JSON.parse(TG_TXT);
+						info.botConfigured = !!TG.BotToken;
+						info.chatId = TG.ChatID || 'none';
+						if (TG.BotToken) {
+							const [wResp, cResp] = await Promise.all([
+								fetch('https://api.telegram.org/bot' + TG.BotToken + '/getWebhookInfo'),
+								fetch('https://api.telegram.org/bot' + TG.BotToken + '/getMyCommands')
+							]);
+							info.webhookInfo = await wResp.json();
+							info.myCommands = await cResp.json();
+						}
+					}
+				} catch(e) { info.error = e.message; }
+				return new Response(JSON.stringify(info, null, 2), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+		}
 		const 安全上下文 = 是注册面板请求 ? null : await 安全预处理({ request, env, ctx, url, 访问IP, UA, 管理员密码, 已登录后台管理员 });
 		if (安全上下文?.response) return 安全上下文.response;
 		if (访问路径 === 'register' || 访问路径 === 'register/') {
@@ -346,6 +404,11 @@ export default {
 						}
 					}
 					return fetch(Pages静态页面 + '/login');
+ 				} else if (访问路径 === 'admin/security') {// 安全模块独立页面
+					const cookies = request.headers.get('Cookie') || '';
+					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
+					if (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码)) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
+					return new Response(生成安全模块独立页面(), { status: 200, headers: { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-store' } });
 				} else if (访问路径 === 'admin' || 访问路径.startsWith('admin/')) {//验证cookie后响应管理页面
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
@@ -483,9 +546,20 @@ export default {
 						return new Response(JSON.stringify(request.cf, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 					}
 
-					ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Admin_Login', config_JSON));
-					const 后台响应 = await fetch(Pages静态页面 + '/admin' + url.search);
-					return await 注入安全管理后台页面(后台响应);
+				ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Admin_Login', config_JSON));
+				const 后台响应 = await fetch(Pages静态页面 + '/admin' + url.search);
+				const contentType = 后台响应.headers.get('content-type') || '';
+				if (contentType.includes('text/html')) {
+					const 后台HTML = await 后台响应.text();
+					const fabHTML = '<a href="/admin/security" id="admin-plus-fab" style="position:fixed;right:24px;bottom:24px;z-index:2147483647;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:#fff;border:none;border-radius:999px;padding:14px 24px;font-size:15px;font-weight:600;cursor:pointer;box-shadow:0 10px 25px -5px rgba(59,130,246,0.5);text-decoration:none;display:flex;align-items:center;gap:8px;transition:all 0.3s ease"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:18px;height:18px"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"/></svg>安全管理</a>';
+					const 输出HTML = 后台HTML.includes('</body>')
+						? 后台HTML.replace('</body>', `${fabHTML}</body>`)
+						: `${后台HTML}${fabHTML}`;
+					const headers = new Headers(后台响应.headers);
+					headers.set('Cache-Control', 'no-store');
+					return new Response(输出HTML, { status: 后台响应.status, statusText: 后台响应.statusText, headers });
+				}
+				return 后台响应;
 				} else if (访问路径 === 'logout' || uuidRegex.test(访问路径)) {//清除cookie并跳转到登录页面
 					const 响应 = new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
 					响应.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly');
@@ -2701,6 +2775,122 @@ async function 请求日志记录(env, request, 访问IP, 请求类型 = "Get_SU
 	} catch (error) { console.error(`日志记录失败: ${error.message}`) }
 }
 
+async function 安全发送TG通知(env, 事件类型, 事件标题, 详情字段列表 = []) {
+	try {
+		const TG_TXT = await env.KV.get('tg.json');
+		if (!TG_TXT) return;
+		const TG_JSON = JSON.parse(TG_TXT);
+		if (!TG_JSON?.BotToken || !TG_JSON?.ChatID) return;
+		const 当前时间 = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+		const 图标映射 = {
+			'user.banned': '🚫', 'user.restored': '✅', 'limit.created': '⚠️',
+			'subscription.limit.exceeded': '📊', 'subscription.invalid-token.detected': '🔑',
+			'subscription.spread.detected': '🌐', 'config.updated': '⚙️',
+			'user.registered': '👤',
+		};
+		const 图标 = 图标映射[事件类型] || '📌';
+		let msg = `<b>${图标} ${事件标题}</b>\n\n`;
+		for (const [键, 值] of 详情字段列表) {
+			msg += `<b>${键}：</b><code>${String(值 ?? '-')}</code>\n`;
+		}
+		msg += `\n⏰ <i>${当前时间}</i>`;
+		await fetch(`https://api.telegram.org/bot${TG_JSON.BotToken}/sendMessage?chat_id=${TG_JSON.ChatID}&parse_mode=HTML&text=${encodeURIComponent(msg)}`, {
+			method: 'GET',
+			headers: { 'Accept': 'text/html,application/xhtml+xml,application/xml;', 'Accept-Encoding': 'gzip, deflate, br', 'User-Agent': 'BeaconCM-Security/1.0' }
+		});
+	} catch (error) {
+		console.error(`[安全TG通知] 发送失败: ${error.message}`);
+	}
+}
+
+async function 安全处理TG命令(env, 运行时, 消息文本, chatId, panelId) {
+	if (!消息文本) return '';
+	const 纯文本 = 消息文本.split(/@\w+/)[0];
+	const parts = 纯文本.trim().split(/\s+/);
+	const cmd = parts[0].toLowerCase();
+	const arg = parts[1] || '';
+	const isB = panelId === 'B';
+	const 匹配命令 = (name) => cmd === (isB ? '/' + name + '2' : '/' + name);
+
+	const 提取账号 = (u) => {
+		if (!u) return '-';
+		if (u.attributes && (u.attributes.account || u.attributes.email || u.attributes.username)) {
+			return u.attributes.account || u.attributes.email || u.attributes.username;
+		}
+		if (typeof u.userKey === 'string' && u.userKey.startsWith('register:')) {
+			return u.userKey.split(':')[2] || '?';
+		}
+		return u.label || (u.uuid || '').slice(0, 8) || '-';
+	};
+
+	const 掩码UUID = (uuid) => 安全掩码UUID(uuid);
+
+	if (匹配命令('bchelp') || cmd === '/start') {
+		return '<b>🔐 安全管理 Bot 命令</b>\n\n' +
+			'<b>/' + (isB ? 'bchelp2' : 'bchelp') + '</b> — 显示此帮助\n' +
+			'<b>/' + (isB ? 'bcbanned2' : 'bcbanned') + '</b> — 列出所有被封禁用户\n' +
+			'<b>/' + (isB ? 'bcbaninfo2' : 'bcbaninfo') + '</b> <code>&lt;用户名&gt;</code> — 查封禁详情\n' +
+			'<b>/' + (isB ? 'bcunban2' : 'bcunban') + '</b> <code>&lt;用户名&gt;</code> — 解封用户\n\n' +
+			'提示：群内有多个机器人时，用 <code>@机器人用户名</code> 指定目标。';
+	}
+
+	if (匹配命令('bcbanned')) {
+		if (!运行时 || !运行时.env) return '系统暂不可用';
+		const users = await 安全列出KV记录(运行时.env, 'sys:user:', 50);
+		const banned = (users || []).filter(u => u && u.subscriptionState === 'banned');
+		if (!banned.length) return '✅ 当前没有被封禁的用户';
+		const lines = banned.map((u, i) => {
+			const account = 提取账号(u);
+			const reason = 安全格式化封禁原因(u.bannedReason);
+			const time = u.bannedAt ? new Date(u.bannedAt).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' }) : '-';
+			return `<b>${i + 1}.</b> <code>${account}</code>\n    📋 ${reason}\n    ⏰ ${time}`;
+		});
+		return `<b>🚫 封禁用户列表 (${banned.length}人)</b>\n\n` + lines.join('\n\n');
+	}
+
+	if (匹配命令('bcbaninfo') && arg) {
+		if (!运行时 || !运行时.env) return '系统暂不可用';
+		const all = await 安全列出KV记录(运行时.env, 'sys:user:', 200);
+		const keyword = arg.trim().toLowerCase();
+		let user = all.find(u => {
+			if (u.uuid && u.uuid.toLowerCase() === keyword) return true;
+			const acct = 提取账号(u);
+			return acct && acct.toLowerCase() === keyword;
+		});
+		if (!user) return '❌ 未找到该用户。支持 UUID 或注册时使用的用户名/邮箱。';
+		const account = 提取账号(user);
+		if (user.subscriptionState !== 'banned') {
+			return `<b>✅ 用户状态正常</b>\n\n👤 账号：<code>${account}</code>`;
+		}
+		const reason = 安全格式化封禁原因(user.bannedReason);
+		const time = user.bannedAt ? new Date(user.bannedAt).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' }) : '-';
+		return `<b>🚫 封禁详情</b>\n\n👤 账号：<code>${account}</code>\n📋 原因：${reason}\n⏰ 封禁时间：${time}\n🆔 <code>${掩码UUID(user.uuid)}</code>`;
+	}
+
+	if (匹配命令('bcunban')) {
+		if (!arg) return '❌ 请输入要解封的用户名，例如：\n<code>/bcunban someone@gmail.com</code>';
+		if (!运行时 || !运行时.env) return '系统暂不可用';
+		const all = await 安全列出KV记录(运行时.env, 'sys:user:', 200);
+		const keyword = arg.trim().toLowerCase();
+		const user = all.find(u => {
+			if (u.uuid && u.uuid.toLowerCase() === keyword) return true;
+			const acct = 提取账号(u);
+			return acct && acct.toLowerCase() === keyword;
+		});
+		if (!user) return '❌ 未找到该用户。请使用注册时使用的用户名/邮箱。';
+		if (user.subscriptionState !== 'banned') return '⚠️ 该用户当前未被封禁';
+		const nowMs = Date.now();
+		const restored = await 安全设置用户订阅状态(运行时, user.uuid, true, {
+			reason: 'tg-bot-unban', source: 'telegram-bot', ip: 'tg-webhook'
+		}, nowMs);
+		if (!restored) return '❌ 解封操作失败，请稍后重试';
+		const account = 提取账号(restored);
+		return `<b>✅ 解封成功</b>\n\n👤 账号：<code>${account}</code>\n⏰ 时间：${new Date(nowMs).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })}`;
+	}
+
+	return '';
+}
+
 function 掩码敏感信息(文本, 前缀长度 = 3, 后缀长度 = 2) {
 	if (!文本 || typeof 文本 !== 'string') return 文本;
 	if (文本.length <= 前缀长度 + 后缀长度) return 文本; // 如果长度太短，直接返回
@@ -3929,8 +4119,6 @@ function 获取默认安全配置() {
 		policy: {
 			sensitivePrefixes: ['/admin', '/login'],
 			observePrefixes: ['/sub', '/version'],
-			cooldownSeconds: 8,
-			cooldownMaxSeconds: 30,
 		},
 		subscription: {
 			enabled: true,
@@ -3946,6 +4134,9 @@ function 获取默认安全配置() {
 		},
 		adminApi: {
 			listLimit: 50,
+		},
+		tgSecurityNotifications: {
+			enabled: false,
 		},
 	};
 }
@@ -4029,7 +4220,6 @@ function 安全标准化配置(原始配置 = {}, env = {}) {
 	if ('SECURITY_IP_MINUTE_LIMIT' in env) merged.thresholds.ip.minute = 安全数值(env.SECURITY_IP_MINUTE_LIMIT, merged.thresholds.ip.minute, 1);
 	if ('SECURITY_BAN_BASE_SECONDS' in env) merged.ban.baseSeconds = 安全数值(env.SECURITY_BAN_BASE_SECONDS, merged.ban.baseSeconds, 60);
 	if ('SECURITY_BAN_MAX_SECONDS' in env) merged.ban.maxSeconds = 安全数值(env.SECURITY_BAN_MAX_SECONDS, merged.ban.maxSeconds, merged.ban.baseSeconds);
-	if ('SECURITY_COOLDOWN_SECONDS' in env) merged.policy.cooldownSeconds = 安全数值(env.SECURITY_COOLDOWN_SECONDS, merged.policy.cooldownSeconds, 1);
 	if ('SECURITY_SUBSCRIPTION_ENABLED' in env) merged.subscription.enabled = 安全布尔值(env.SECURITY_SUBSCRIPTION_ENABLED, merged.subscription.enabled);
 	if ('SECURITY_SUBSCRIPTION_HOURLY_LIMIT' in env) merged.subscription.hourlyLimit = 安全数值(env.SECURITY_SUBSCRIPTION_HOURLY_LIMIT, merged.subscription.hourlyLimit, 1, 1000);
 	if ('SECURITY_SUBSCRIPTION_INVALID_HOURLY_LIMIT' in env) merged.subscription.invalidTokenHourlyLimit = 安全数值(env.SECURITY_SUBSCRIPTION_INVALID_HOURLY_LIMIT, merged.subscription.invalidTokenHourlyLimit, 1, 1000);
@@ -4038,6 +4228,7 @@ function 安全标准化配置(原始配置 = {}, env = {}) {
 	if ('SECURITY_REGISTER_SCHEDULE_ENABLED' in env) merged.register.scheduleEnabled = 安全布尔值(env.SECURITY_REGISTER_SCHEDULE_ENABLED, merged.register.scheduleEnabled);
 	if ('SECURITY_REGISTER_START_AT' in env) merged.register.startAt = 安全时间戳(env.SECURITY_REGISTER_START_AT, merged.register.startAt);
 	if ('SECURITY_REGISTER_END_AT' in env) merged.register.endAt = 安全时间戳(env.SECURITY_REGISTER_END_AT, merged.register.endAt);
+	if ('SECURITY_TG_NOTIFY_ENABLED' in env) merged.tgSecurityNotifications.enabled = 安全布尔值(env.SECURITY_TG_NOTIFY_ENABLED, merged.tgSecurityNotifications.enabled);
 	merged.enabled = 安全布尔值(merged.enabled, false);
 	merged.abuse.payload.enabled = 安全布尔值(merged.abuse.payload.enabled, true);
 	merged.abuse.userAgent.enabled = 安全布尔值(merged.abuse.userAgent.enabled, true);
@@ -4060,8 +4251,6 @@ function 安全标准化配置(原始配置 = {}, env = {}) {
 	merged.abuse.pathSequence.sensitivePrefixes = Array.isArray(merged.abuse.pathSequence.sensitivePrefixes) ? [...new Set([...merged.abuse.pathSequence.sensitivePrefixes.map(item => String(item).toLowerCase()).filter(Boolean), '/admin', '/login'])] : ['/admin', '/login'];
 	merged.policy.sensitivePrefixes = Array.isArray(merged.policy.sensitivePrefixes) ? merged.policy.sensitivePrefixes.map(item => String(item).toLowerCase()) : ['/admin', '/login'];
 	merged.policy.observePrefixes = Array.isArray(merged.policy.observePrefixes) ? merged.policy.observePrefixes.map(item => String(item).toLowerCase()) : ['/sub', '/version'];
-	merged.policy.cooldownSeconds = 安全数值(merged.policy.cooldownSeconds, 8, 1, 30);
-	merged.policy.cooldownMaxSeconds = 安全数值(merged.policy.cooldownMaxSeconds, 30, merged.policy.cooldownSeconds, 120);
 	return 安全应用阈值下限(merged);
 }
 
@@ -4250,10 +4439,6 @@ function 安全计数器键(subjectType, subjectId, scope, scopeValue, window, b
 
 function 安全活跃封禁键(subjectType, subjectId) {
 	return `${安全活跃封禁前缀}${subjectType}:${安全FNV1a(subjectId)}`;
-}
-
-function 安全短暂冷却键(subjectType, subjectId, scopeValue) {
-	return `${安全短暂冷却前缀}${subjectType}:${安全FNV1a(subjectId)}:${安全FNV1a(scopeValue)}`;
 }
 
 function 安全封禁历史键(subjectType, subjectId, createdAt, banId) {
@@ -4763,13 +4948,18 @@ async function 安全获取订阅访问令牌(url, user = {}) {
 }
 
 function 安全格式化封禁原因(reason) {
-	const normalized = String(reason || '').trim().toLowerCase();
-	if (!normalized) return '管理员手动封禁';
-	if (normalized === 'subscription-hourly-limit') return '超出每小时订阅上限';
-	if (normalized === 'subscription-invalid-token-threshold') return '无效令牌过多';
-	if (normalized === 'subscription-ip-spread-threshold') return 'IP 扩散异常';
-	if (normalized === 'admin' || normalized === 'admin-banned' || normalized === 'admin-ui' || normalized === 'admin-ui-batch') return '管理员手动封禁';
-	return String(reason);
+    const normalized = String(reason || '').trim().toLowerCase();
+    if (!normalized) return '管理员手动封禁';
+    if (normalized === 'subscription-hourly-limit') return '超出每小时订阅上限';
+    if (normalized === 'subscription-invalid-token-threshold') return '无效令牌过多';
+    if (normalized === 'subscription-ip-spread-threshold') return 'IP 扩散异常';
+    if (normalized === 'admin' || normalized === 'admin-banned' || normalized === 'admin-ui' || normalized === 'admin-ui-batch') return '管理员手动封禁';
+    return String(reason);
+}
+
+function 安全掩码UUID(uuid) {
+    if (!uuid) return '-';
+    return String(uuid).slice(0, 8) + '...';
 }
 
 async function 创建安全运行时(env) {
@@ -4953,6 +5143,15 @@ async function 安全设置用户订阅状态(运行时, uuid, enabled, meta = {
 		},
 		createdAt: nowMs,
 	});
+	const account = (saved.attributes && (saved.attributes.account || saved.attributes.email)) || saved.label || '-';
+	const eventType = enabled ? 'user.restored' : 'user.banned';
+	const title = enabled ? `#管理员解封 ${account}` : `#管理员封禁 ${account}`;
+	安全发送TG通知(运行时.env, eventType, title, [
+		['账号', account],
+		['UUID', 安全掩码UUID(saved.uuid)],
+		['原因', 安全格式化封禁原因(enabled ? (meta.reason || 'admin-restored') : stateReason)],
+		['来源', meta.source || 'admin-panel'],
+	]);
 	return saved;
 }
 
@@ -4977,6 +5176,14 @@ async function 安全封禁用户账号(运行时, uuid, meta = {}, nowMs = Date
 		},
 		createdAt: nowMs,
 	});
+	const account = (saved.attributes && (saved.attributes.account || saved.attributes.email)) || saved.label || '-';
+	安全发送TG通知(运行时.env, 'user.banned', `#自动封禁 ${account}`, [
+		['账号', account],
+		['UUID', 安全掩码UUID(saved.uuid)],
+		['原因', 安全格式化封禁原因(meta.reason || 'subscription-threshold-exceeded')],
+		['触发', meta.trigger || '-'],
+		['来源', meta.source || 'subscription-guard'],
+	]);
 	return saved;
 }
 
@@ -5206,53 +5413,26 @@ async function 安全创建封禁(运行时, config, banInput, nowMs) {
 	return record;
 }
 
-async function 安全删除前缀键(env, prefix) {
-	let cursor;
-	let deletedCount = 0;
+async function 安全清理主体状态(运行时, subjectType, subjectId) {
+	if (!subjectId) return { counters: 0 };
+	const hashedSubjectId = 安全FNV1a(subjectId);
+	let cursor, deletedCount = 0;
 	do {
-		const page = await env.KV.list({ prefix, limit: 100, cursor });
+		const page = await 运行时.env.KV.list({ prefix: `${安全计数器前缀}${subjectType}:${hashedSubjectId}:`, limit: 100, cursor });
 		for (const keyInfo of page.keys) {
-			await env.KV.delete(keyInfo.name);
+			await 运行时.env.KV.delete(keyInfo.name);
 			deletedCount++;
 		}
 		cursor = page.list_complete ? undefined : page.cursor;
 	} while (cursor);
-	return deletedCount;
-}
-
-async function 安全清理主体状态(运行时, subjectType, subjectId) {
-	if (!subjectId) return { cooldowns: 0, counters: 0 };
-	const hashedSubjectId = 安全FNV1a(subjectId);
-	const cooldowns = await 安全删除前缀键(运行时.env, `${安全短暂冷却前缀}${subjectType}:${hashedSubjectId}:`);
-	const counters = await 安全删除前缀键(运行时.env, `${安全计数器前缀}${subjectType}:${hashedSubjectId}:`);
-	return { cooldowns, counters };
+	return { counters: deletedCount };
 }
 
 async function 安全手动解封(运行时, subjectType, subjectId, nowMs, reason = 'manual') {
 	const active = await 安全KV读取JSON(运行时.env, 安全活跃封禁键(subjectType, subjectId), null);
-	const cooldownRecords = [];
-	for (const scopeValue of ['*']) {
-		const cooldown = await 安全获取短暂冷却(运行时, subjectType, subjectId, scopeValue, nowMs);
-		if (cooldown) cooldownRecords.push(cooldown);
-	}
-	const cooldownPrefix = `${安全短暂冷却前缀}${subjectType}:${安全FNV1a(subjectId)}:`;
-	const allCooldowns = await 安全列出KV记录(运行时.env, cooldownPrefix, 50);
-	for (const item of allCooldowns) {
-		if (item && !cooldownRecords.some(existing => existing.cooldownId === item.cooldownId)) cooldownRecords.push(item);
-	}
 	const cleared = await 安全清理主体状态(运行时, subjectType, subjectId);
 	if (active) await 运行时.env.KV.delete(安全活跃封禁键(subjectType, subjectId));
-	const relatedUuids = new Set([
-		active?.relatedUuid,
-		...cooldownRecords.map(item => item?.relatedUuid),
-	].filter(Boolean));
-	let relatedCleared = [];
-	for (const relatedUuid of relatedUuids) {
-		if (relatedUuid !== subjectId) {
-			relatedCleared.push({ uuid: relatedUuid, ...(await 安全清理主体状态(运行时, 'uuid', relatedUuid)) });
-		}
-	}
-	if (!active && !cleared.cooldowns && !cleared.counters && !relatedCleared.length) return null;
+	if (!active && !cleared.counters) return null;
 	await 安全记录事件(运行时, {
 		eventType: 'limit.released',
 		subjectType,
@@ -5263,71 +5443,12 @@ async function 安全手动解封(运行时, subjectType, subjectId, nowMs, reas
 			reason,
 			banId: active?.banId || null,
 			releasedAt: nowMs,
-			clearedCooldowns: cleared.cooldowns,
 			clearedCounters: cleared.counters,
-			relatedUuid: active?.relatedUuid || cooldownRecords.find(item => item?.relatedUuid)?.relatedUuid || null,
-			relatedCleared,
+			relatedUuid: active?.relatedUuid || null,
 		},
 		createdAt: nowMs,
 	});
-	return active || { subjectType, subjectId, releasedAt: nowMs, ...cleared, relatedCleared };
-}
-
-async function 安全获取短暂冷却(运行时, subjectType, subjectId, scopeValue, nowMs) {
-	if (!subjectId) return null;
-	const current = await 安全KV读取JSON(运行时.env, 安全短暂冷却键(subjectType, subjectId, scopeValue), null);
-	if (!current) return null;
-	if (安全数值(current.expiresAt, 0, 0) <= nowMs) {
-		await 运行时.env.KV.delete(安全短暂冷却键(subjectType, subjectId, scopeValue));
-		await 安全记录事件(运行时, {
-			eventType: 'cooldown.expired',
-			subjectType,
-			subjectId,
-			ip: current.ip || null,
-			endpoint: current.endpoint || null,
-			payload: { reasonType: current.reasonType, scopeValue },
-			createdAt: nowMs,
-		});
-		return null;
-	}
-	return current;
-}
-
-async function 安全创建短暂冷却(运行时, config, cooldownInput, nowMs) {
-	const durationSeconds = Math.min(config.policy.cooldownMaxSeconds, Math.max(1, config.policy.cooldownSeconds));
-	const record = {
-		cooldownId: 安全生成UUID(),
-		subjectType: cooldownInput.subjectType,
-		subjectId: cooldownInput.subjectId,
-		scope: cooldownInput.scope || 'global',
-		scopeValue: cooldownInput.scopeValue || '*',
-		ip: cooldownInput.ip || null,
-		endpoint: cooldownInput.endpoint || null,
-		reasonType: cooldownInput.reasonType || 'freq_limit',
-		reasonDetail: cooldownInput.reasonDetail || '',
-		createdAt: nowMs,
-		expiresAt: nowMs + durationSeconds * 1000,
-		durationSeconds,
-		relatedUuid: cooldownInput.relatedUuid || null,
-	};
-	await 安全KV写入JSON(运行时.env, 安全短暂冷却键(record.subjectType, record.subjectId, record.scopeValue), record, durationSeconds + 60);
-	await 安全记录事件(运行时, {
-		eventType: 'cooldown.created',
-		subjectType: record.subjectType,
-		subjectId: record.subjectId,
-		ip: record.ip,
-		endpoint: record.endpoint,
-		payload: {
-			scope: record.scope,
-			scopeValue: record.scopeValue,
-			reasonType: record.reasonType,
-			reasonDetail: record.reasonDetail,
-			durationSeconds: record.durationSeconds,
-			relatedUuid: record.relatedUuid,
-		},
-		createdAt: nowMs,
-	});
-	return record;
+	return active || { subjectType, subjectId, releasedAt: nowMs, ...cleared };
 }
 
 async function 安全增加计数(运行时, subjectType, subjectId, endpoint, window, scope, scopeValue, nowMs) {
@@ -5403,10 +5524,10 @@ function 安全判断请求策略(config, request, url) {
 	return {
 		sensitivePath,
 		observeOnly,
-		userAgentAction: observeOnly ? 'ignore' : (sensitivePath ? 'ban' : 'cooldown'),
-		payloadAction: observeOnly ? 'ignore' : (sensitivePath ? 'ban' : 'cooldown'),
-		pathSequenceAction: observeOnly ? 'ignore' : (sensitivePath ? 'ban' : 'cooldown'),
-		thresholdAction: observeOnly ? 'observe' : (sensitivePath || isWriteMethod && pathname.startsWith('/admin') ? 'ban' : 'cooldown'),
+		userAgentAction: observeOnly ? 'ignore' : (sensitivePath ? 'ban' : 'observe'),
+		payloadAction: observeOnly ? 'ignore' : (sensitivePath ? 'ban' : 'observe'),
+		pathSequenceAction: observeOnly ? 'ignore' : (sensitivePath ? 'ban' : 'observe'),
+		thresholdAction: observeOnly ? 'observe' : (sensitivePath || isWriteMethod && pathname.startsWith('/admin') ? 'ban' : 'observe'),
 	};
 }
 
@@ -5456,7 +5577,7 @@ async function 安全检查滥用(运行时, config, request, url, 访问IP, UA,
 				reasonType: 'agent_rule',
 				reasonDetail: matched,
 				relatedUuid: identity?.uuid || null,
-				action: requestPolicy?.userAgentAction || 'cooldown',
+				action: requestPolicy?.userAgentAction || 'observe',
 				scope: 'endpoint',
 				scopeValue: 安全标准化接口(request, url),
 			};
@@ -5527,22 +5648,6 @@ function 安全封禁响应(activeBan, nowMs) {
 	}, 429, { 'Retry-After': String(retryAfter) });
 }
 
-function 安全冷却响应(cooldown, nowMs) {
-	const retryAfter = Math.max(1, Math.ceil((安全数值(cooldown.expiresAt, nowMs, 0) - nowMs) / 1000));
-	return 安全JSON响应({
-		success: false,
-		code: 'REQUEST_COOLDOWN',
-		subjectType: cooldown.subjectType,
-		subjectId: cooldown.subjectId,
-		scope: cooldown.scope,
-		scopeValue: cooldown.scopeValue,
-		reasonType: cooldown.reasonType,
-		reasonDetail: cooldown.reasonDetail,
-		expiresAt: cooldown.expiresAt,
-		retryAfter,
-	}, 429, { 'Retry-After': String(retryAfter) });
-}
-
 async function 安全预处理({ request, env, ctx, url, 访问IP, UA, 管理员密码, 已登录后台管理员 = false }) {
 	try {
 		if (!管理员密码) return null;
@@ -5560,6 +5665,38 @@ async function 安全预处理({ request, env, ctx, url, 访问IP, UA, 管理员
 	}
 }
 
+async function 处理TGWebhook({ request, env, ctx, 访问IP }) {
+	const body = await request.json().catch(() => null);
+	if (!body) return new Response('OK', { status: 200 });
+	const message = body.message || body.edited_message;
+	if (!message || !message.text || !message.chat) return new Response('OK', { status: 200 });
+	const chatId = String(message.chat.id);
+
+	let botToken = null;
+	try {
+		const TG_TXT = await env.KV.get('tg.json');
+		if (!TG_TXT) return new Response('OK', { status: 200 });
+		const TG_JSON = JSON.parse(TG_TXT);
+		if (!TG_JSON.BotToken) return new Response('OK', { status: 200 });
+		botToken = TG_JSON.BotToken;
+		const configuredChatId = String(TG_JSON.ChatID || '');
+		if (configuredChatId && configuredChatId !== chatId) {
+			await fetch('https://api.telegram.org/bot' + botToken + '/sendMessage?' + new URLSearchParams({ chat_id: chatId, text: '未授权群组 ChatID: ' + chatId + ' 已配置: ' + configuredChatId }).toString());
+			return new Response('OK', { status: 200 });
+		}
+
+		const 运行时 = await 创建安全运行时(env);
+		const replyText = await 安全处理TG命令(env, 运行时, message.text, chatId);
+		await fetch('https://api.telegram.org/bot' + botToken + '/sendMessage?' + new URLSearchParams({ chat_id: chatId, parse_mode: 'HTML', text: replyText }).toString());
+
+	} catch (error) {
+		if (botToken) {
+			await fetch('https://api.telegram.org/bot' + botToken + '/sendMessage?' + new URLSearchParams({ chat_id: chatId, text: 'Error: ' + (error && error.message || error) }).toString());
+		}
+	}
+	return new Response('OK', { status: 200 });
+}
+
 async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }) {
 	const 运行时 = await 创建安全运行时(env);
 	if (!运行时) return 安全JSON响应({ success: false, error: '管理存储未就绪，请先绑定 KV。' }, 503);
@@ -5569,15 +5706,13 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 	const limit = 安全数值(url.searchParams.get('limit'), 当前配置.adminApi.listLimit, 1, 200);
 
 	if ((pathname === '/admin/system' || pathname === '/admin/system/overview') && request.method === 'GET') {
-		const [activeBansRaw, activeCooldownsRaw, recentEventsRaw, userCount, users] = await Promise.all([
+		const [activeBansRaw, recentEventsRaw, userCount, users] = await Promise.all([
 			安全列出KV记录(运行时.env, 安全活跃封禁前缀, limit),
-			安全列出KV记录(运行时.env, 安全短暂冷却前缀, limit),
 			安全列出KV记录(运行时.env, 安全事件前缀, limit),
 			安全统计键数量(运行时.env, 安全用户前缀, 5000),
 			安全列出KV记录(运行时.env, 安全用户前缀, Math.min(limit * 4, 80)),
 		]);
 		const activeBans = 安全过滤未过期(activeBansRaw, nowMs);
-		const activeCooldowns = 安全过滤未过期(activeCooldownsRaw, nowMs);
 		const recentEvents = 安全按时间倒序(recentEventsRaw, limit);
 		const userInfos = await Promise.all(users.map(user => 安全构建用户管理信息(运行时, url, user, nowMs, 当前配置)));
 		const topSubscriptionRisks = userInfos
@@ -5590,12 +5725,10 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 			summary: {
 				userCount,
 				activeBanCount: activeBans.length,
-				activeCooldownCount: activeCooldowns.length,
 				recentEventCount: recentEvents.length,
 				highRiskSubscriptionCount: topSubscriptionRisks.filter(item => item.subscription?.risk?.level === 'high' || item.subscription?.status === 'banned').length,
 			},
 			activeBans: 安全按时间倒序(activeBans, limit),
-			activeCooldowns: 安全按时间倒序(activeCooldowns, limit),
 			recentEvents,
 			topSubscriptionRisks,
 		});
@@ -5887,6 +6020,42 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 	if (pathname === '/admin/system/events' && request.method === 'GET') {
 		const events = await 安全列出KV记录(运行时.env, 安全事件前缀, Math.min(limit, 30));
 		return 安全JSON响应({ success: true, events: 安全按时间倒序(events, limit) });
+	}
+
+	if (pathname === '/admin/system/tg-config' && request.method === 'GET') {
+		try {
+			const TG_TXT = await env.KV.get('tg.json');
+			const TG_JSON = TG_TXT ? JSON.parse(TG_TXT) : { BotToken: null, ChatID: null };
+			return 安全JSON响应({
+				botToken: TG_JSON.BotToken || '',
+				chatId: TG_JSON.ChatID || '',
+				panelId: TG_JSON.PanelID || 'A',
+				securityNotifyEnabled: 当前配置.tgSecurityNotifications?.enabled || false,
+			});
+		} catch (e) {
+			return 安全JSON响应({ botToken: '', chatId: '', panelId: 'A', securityNotifyEnabled: false });
+		}
+	}
+
+	if (pathname === '/admin/system/tg-config' && request.method === 'POST') {
+		try {
+			const body = await request.json().catch(() => ({}));
+			const tgData = { BotToken: null, ChatID: null, PanelID: 'A' };
+			if (body.BotToken) tgData.BotToken = body.BotToken;
+			if (body.ChatID) tgData.ChatID = String(body.ChatID);
+			if (body.PanelID) tgData.PanelID = String(body.PanelID);
+			const existing = JSON.parse((await env.KV.get('tg.json')) || '{}');
+			await env.KV.put('tg.json', JSON.stringify({ ...existing, ...tgData }, null, 2));
+			if (typeof body.securityNotifyEnabled === 'boolean') {
+				const updated = await 保存安全配置(env, 运行时, 安全深合并(当前配置, {
+					tgSecurityNotifications: { enabled: body.securityNotifyEnabled }
+				}));
+				return 安全JSON响应({ success: true, message: 'TG 设置已保存', enabled: updated.tgSecurityNotifications?.enabled || false });
+			}
+			return 安全JSON响应({ success: true, message: 'TG 设置已保存' });
+		} catch (error) {
+			return 安全JSON响应({ success: false, error: '保存 TG 设置失败: ' + error.message }, 500);
+		}
 	}
 
 	return 安全JSON响应({ success: false, error: '未找到对应管理接口' }, 404);
@@ -6476,180 +6645,837 @@ async function 注入安全管理后台页面(response) {
 function 生成安全管理后台注入代码() {
 	return `
 <style id="admin-plus-style">
-:root {
-  --ap-bg-shell: #0f172a;
-  --ap-bg-sidebar: #1e293b;
-  --ap-bg-panel: #1e293b;
-  --ap-bg-input: #0f172a;
-  --ap-text-main: #f8fafc;
-  --ap-text-muted: #94a3b8;
-  --ap-primary: #3b82f6;
-  --ap-primary-hover: #2563eb;
-  --ap-danger: #ef4444;
-  --ap-danger-hover: #dc2626;
-  --ap-border: #334155;
-  --ap-border-light: rgba(148, 163, 184, 0.1);
-  --ap-radius-lg: 16px;
-  --ap-radius-md: 12px;
-  --ap-radius-sm: 8px;
-  --ap-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+/* ═══════════════════════════════════════════════════════════════════
+   THEME 1: SPACEX — Terminal Command Center
+   Layout: Full-width terminal with top command bar
+   ═══════════════════════════════════════════════════════════════════ */
+[data-ap-theme="spacex"] {
+  --ap-bg: #000000;
+  --ap-surface: #0a0a0a;
+  --ap-surface-hover: #111111;
+  --ap-border: #1a1a1a;
+  --ap-text: #ffffff;
+  --ap-text-muted: #666666;
+  --ap-accent: #ffffff;
+  --ap-accent-glow: rgba(255,255,255,.1);
+  --ap-danger: #ff4444;
+  --ap-success: #00ff00;
+  --ap-warn: #ffaa00;
+  --ap-radius: 0px;
+  --ap-radius-sm: 0px;
+  --ap-shadow: none;
+  --ap-shadow-lg: none;
+  --ap-font: 'Courier New', Courier, monospace;
+  --ap-font-ui: 'Courier New', Courier, monospace;
+  --ap-border-accent: 1px solid #333333;
+  --ap-card-border: 1px solid #1a1a1a;
+  --ap-layout-sidebar: 0px;
+}
+[data-ap-theme="spacex"] #admin-plus-shell {
+  background: #000000;
+  font-family: 'Courier New', Courier, monospace;
+  min-height: 100vh;
+}
+[data-ap-theme="spacex"] .admin-plus-cmd-bar {
+  background: #0a0a0a;
+  border-bottom: 1px solid #333333;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+[data-ap-theme="spacex"] .admin-plus-cmd-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #ffffff;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+[data-ap-theme="spacex"] .admin-plus-cmd-prompt {
+  color: #666666;
+  font-size: 12px;
+}
+[data-ap-theme="spacex"] .admin-plus-cmd-time {
+  color: #666666;
+  font-size: 11px;
+  font-family: 'Courier New', Courier, monospace;
+}
+[data-ap-theme="spacex"] .admin-plus-nav {
+  display: flex;
+  gap: 0px;
+  border-bottom: 1px solid #1a1a1a;
+  background: #000000;
+  padding: 0;
+}
+[data-ap-theme="spacex"] .admin-plus-tab {
+  background: transparent;
+  border: none;
+  border-right: 1px solid #1a1a1a;
+  color: #666666;
+  padding: 14px 20px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  transition: all 0s;
+  font-family: 'Courier New', Courier, monospace;
+}
+[data-ap-theme="spacex"] .admin-plus-tab:hover {
+  background: #0a0a0a;
+  color: #ffffff;
+}
+[data-ap-theme="spacex"] .admin-plus-tab.active {
+  background: #ffffff;
+  color: #000000;
+}
+[data-ap-theme="spacex"] .admin-plus-btn {
+  background: transparent;
+  border: 1px solid #333333;
+  color: #ffffff;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  font-family: 'Courier New', Courier, monospace;
+}
+[data-ap-theme="spacex"] .admin-plus-btn:hover {
+  background: #ffffff;
+  color: #000000;
+}
+[data-ap-theme="spacex"] .admin-plus-btn.secondary {
+  background: transparent;
+  border-color: #333333;
+  color: #666666;
+}
+[data-ap-theme="spacex"] .admin-plus-btn.secondary:hover {
+  background: #333333;
+  color: #ffffff;
+}
+[data-ap-theme="spacex"] .admin-plus-btn.warn {
+  background: transparent;
+  border-color: #ff4444;
+  color: #ff4444;
+}
+[data-ap-theme="spacex"] .admin-plus-btn.warn:hover {
+  background: #ff4444;
+  color: #000000;
+}
+[data-ap-theme="spacex"] .admin-plus-card {
+  background: #0a0a0a;
+  border: 1px solid #222222;
+  padding: 16px;
+}
+[data-ap-theme="spacex"] .admin-plus-card h4 {
+  color: #555555;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin: 0 0 8px;
+}
+[data-ap-theme="spacex"] .admin-plus-card strong {
+  color: #ffffff;
+  font-size: 28px;
+  font-weight: 700;
+}
+[data-ap-theme="spacex"] .admin-plus-panel {
+  background: #0a0a0a;
+  border: 1px solid #222222;
+  padding: 20px;
+}
+[data-ap-theme="spacex"] .admin-plus-panel h3 {
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin: 0 0 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #1a1a1a;
+}
+[data-ap-theme="spacex"] .admin-plus-table th,
+[data-ap-theme="spacex"] .admin-plus-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #1a1a1a;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+}
+[data-ap-theme="spacex"] .admin-plus-table th {
+  color: #666666;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  background: #000000;
+}
+[data-ap-theme="spacex"] .admin-plus-table code {
+  background: #111111;
+  color: #00ff00;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+[data-ap-theme="spacex"] .admin-plus-badge {
+  background: transparent;
+  border: 1px solid #333333;
+  color: #666666;
+  padding: 2px 8px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+[data-ap-theme="spacex"] .admin-plus-badge.warn {
+  border-color: #ff4444;
+  color: #ff4444;
+}
+[data-ap-theme="spacex"] .admin-plus-inline-input,
+[data-ap-theme="spacex"] .admin-plus-field input,
+[data-ap-theme="spacex"] .admin-plus-field select {
+  background: #000000;
+  border: 1px solid #333333;
+  color: #ffffff;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-family: 'Courier New', Courier, monospace;
+}
+[data-ap-theme="spacex"] .admin-plus-inline-input:focus,
+[data-ap-theme="spacex"] .admin-plus-field input:focus,
+[data-ap-theme="spacex"] .admin-plus-field select:focus {
+  border-color: #ffffff;
+  outline: none;
+}
+[data-ap-theme="spacex"] .admin-plus-status {
+  color: #666666;
+  font-size: 11px;
+  padding: 8px 20px;
+  border-bottom: 1px solid #1a1a1a;
+  font-family: 'Courier New', Courier, monospace;
 }
 
-#admin-plus-fab { position:fixed;right:24px;bottom:24px;z-index:2147483000;background:linear-gradient(135deg, var(--ap-primary), #8b5cf6);color:#fff;border:none;border-radius:999px;padding:14px 24px;font-size:15px;font-weight:600;cursor:pointer;box-shadow:0 10px 25px -5px rgba(59, 130, 246, 0.5);transition:all 0.3s ease;display:flex;align-items:center;gap:8px; }
-#admin-plus-fab:hover { transform:translateY(-2px);box-shadow:0 15px 30px -5px rgba(59, 130, 246, 0.6); }
-#admin-plus-fab svg { width:18px;height:18px; }
+/* ═══════════════════════════════════════════════════════════════════
+   THEME 2: SPOTIFY — Immersive Dark Sidebar
+   Layout: Fixed left sidebar + scrollable content
+   ═══════════════════════════════════════════════════════════════════ */
+[data-ap-theme="spotify"] {
+  --ap-bg: #121212;
+  --ap-surface: #181818;
+  --ap-surface-hover: #282828;
+  --ap-border: #282828;
+  --ap-text: #ffffff;
+  --ap-text-muted: #b3b3b3;
+  --ap-accent: #1ed760;
+  --ap-accent-glow: rgba(30,215,96,.2);
+  --ap-danger: #f3727f;
+  --ap-success: #1ed760;
+  --ap-warn: #ffa42b;
+  --ap-radius: 8px;
+  --ap-radius-sm: 500px;
+  --ap-shadow: 0 8px 24px rgba(0,0,0,.5);
+  --ap-shadow-lg: 0 16px 48px rgba(0,0,0,.6);
+  --ap-font: 'Inter',system-ui,-apple-system,sans-serif;
+  --ap-font-ui: 'Inter',system-ui,-apple-system,sans-serif;
+  --ap-border-accent: 1px solid #404040;
+  --ap-card-border: 1px solid #282828;
+  --ap-layout-sidebar: 220px;
+}
+[data-ap-theme="spotify"] #admin-plus-shell {
+  background: #121212;
+  display: flex;
+  min-height: 100vh;
+}
+[data-ap-theme="spotify"] .admin-plus-sidebar {
+  width: 220px;
+  min-width: 220px;
+  background: #000000;
+  height: 100vh;
+  position: fixed;
+  top: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #282828;
+}
+[data-ap-theme="spotify"] .admin-plus-sidebar-brand {
+  padding: 20px 16px;
+  border-bottom: 1px solid #282828;
+}
+[data-ap-theme="spotify"] .admin-plus-sidebar-brand h1 {
+  color: #1ed760;
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0;
+}
+[data-ap-theme="spotify"] .admin-plus-sidebar-nav {
+  flex: 1;
+  padding: 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+[data-ap-theme="spotify"] .admin-plus-sidebar-tab {
+  background: transparent;
+  border: none;
+  color: #b3b3b3;
+  padding: 12px 12px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transition: background 0.2s;
+}
+[data-ap-theme="spotify"] .admin-plus-sidebar-tab svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+[data-ap-theme="spotify"] .admin-plus-sidebar-tab:hover {
+  background: #282828;
+  color: #ffffff;
+}
+[data-ap-theme="spotify"] .admin-plus-sidebar-tab.active {
+  background: #282828;
+  color: #1ed760;
+}
+[data-ap-theme="spotify"] .admin-plus-main {
+  margin-left: 220px;
+  flex: 1;
+  padding: 24px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+[data-ap-theme="spotify"] .admin-plus-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #282828;
+}
+[data-ap-theme="spotify"] .admin-plus-status {
+  color: #b3b3b3;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+[data-ap-theme="spotify"] .admin-plus-status::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #1ed760;
+}
+[data-ap-theme="spotify"] .admin-plus-btn {
+  background: #1ed760;
+  border: none;
+  color: #000000;
+  padding: 10px 20px;
+  border-radius: 500px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+[data-ap-theme="spotify"] .admin-plus-btn:hover {
+  transform: scale(1.04);
+}
+[data-ap-theme="spotify"] .admin-plus-btn.secondary {
+  background: transparent;
+  border: 1px solid #404040;
+  color: #ffffff;
+}
+[data-ap-theme="spotify"] .admin-plus-btn.secondary:hover {
+  background: #282828;
+}
+[data-ap-theme="spotify"] .admin-plus-btn.warn {
+  background: transparent;
+  border: 1px solid #f3727f;
+  color: #f3727f;
+}
+[data-ap-theme="spotify"] .admin-plus-btn.warn:hover {
+  background: #f3727f;
+  color: #000000;
+}
+[data-ap-theme="spotify"] .admin-plus-card {
+  background: #181818;
+  border-radius: 8px;
+  padding: 20px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.2);
+}
+[data-ap-theme="spotify"] .admin-plus-card h4 {
+  color: #b3b3b3;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin: 0 0 8px;
+}
+[data-ap-theme="spotify"] .admin-plus-card strong {
+  color: #ffffff;
+  font-size: 32px;
+  font-weight: 700;
+}
+[data-ap-theme="spotify"] .admin-plus-panel {
+  background: #181818;
+  border-radius: 8px;
+  padding: 24px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.2);
+}
+[data-ap-theme="spotify"] .admin-plus-panel h3 {
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 16px;
+}
+[data-ap-theme="spotify"] .admin-plus-table th,
+[data-ap-theme="spotify"] .admin-plus-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid #282828;
+  font-size: 13px;
+}
+[data-ap-theme="spotify"] .admin-plus-table th {
+  color: #b3b3b3;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  background: #121212;
+}
+[data-ap-theme="spotify"] .admin-plus-table tr:hover td {
+  background: #282828;
+}
+[data-ap-theme="spotify"] .admin-plus-table code {
+  background: #000000;
+  color: #1ed760;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+[data-ap-theme="spotify"] .admin-plus-badge {
+  background: rgba(30,215,96,.15);
+  color: #1ed760;
+  padding: 4px 10px;
+  border-radius: 500px;
+  font-size: 11px;
+  font-weight: 700;
+}
+[data-ap-theme="spotify"] .admin-plus-badge.warn {
+  background: rgba(243,114,127,.15);
+  color: #f3727f;
+}
+[data-ap-theme="spotify"] .admin-plus-inline-input,
+[data-ap-theme="spotify"] .admin-plus-field input,
+[data-ap-theme="spotify"] .admin-plus-field select {
+  background: #121212;
+  border: 1px solid #404040;
+  color: #ffffff;
+  padding: 12px 14px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+[data-ap-theme="spotify"] .admin-plus-inline-input:focus,
+[data-ap-theme="spotify"] .admin-plus-field input:focus,
+[data-ap-theme="spotify"] .admin-plus-field select:focus {
+  border-color: #1ed760;
+  outline: none;
+}
 
-#admin-plus-overlay { position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:2147482998;opacity:0;pointer-events:none;transition:opacity 0.3s ease; }
-#admin-plus-shell { position:fixed;top:0;right:0;width:min(1200px, 95vw);height:100vh;background:var(--ap-bg-shell);color:var(--ap-text-main);z-index:2147482999;transform:translateX(100%);transition:transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);box-shadow:-10px 0 40px rgba(0,0,0,0.5);font-family:'Inter', system-ui, -apple-system, sans-serif;display:flex;flex-direction:column; }
+/* ═══════════════════════════════════════════════════════════════════
+   THEME 3: VERCEL — Clean White Engineering Console
+   ═══════════════════════════════════════════════════════════════════ */
+[data-ap-theme="vercel"] {
+  --ap-bg: #fafafa;
+  --ap-surface: #ffffff;
+  --ap-surface-hover: #f5f5f5;
+  --ap-border: #ebebeb;
+  --ap-text: #171717;
+  --ap-text-muted: #4d4d4d;
+  --ap-accent: #2d2d2d;
+  --ap-accent-glow: rgba(45,45,45,.06);
+  --ap-danger: #ee0000;
+  --ap-success: #2d2d2d;
+  --ap-warn: #f5a623;
+  --ap-radius: 8px;
+  --ap-radius-sm: 6px;
+  --ap-shadow: 0 1px 1px rgba(0,0,0,.02), 0 2px 2px rgba(0,0,0,.04);
+  --ap-shadow-lg: 0 2px 2px rgba(0,0,0,.03), 0 8px 12px -4px rgba(0,0,0,.06);
+  --ap-font: 'Inter',system-ui,-apple-system,sans-serif;
+  --ap-font-ui: 'Inter',system-ui,-apple-system,sans-serif;
+  --ap-border-accent: 1px solid #ebebeb;
+  --ap-card-border: 1px solid #ebebeb;
+  --ap-layout-sidebar: 0px;
+}
+[data-ap-theme="vercel"] #admin-plus-shell {
+  background: #fafafa;
+  color: #171717;
+  font-family: 'Inter',system-ui,-apple-system,sans-serif;
+  min-height: 100vh;
+}
+[data-ap-theme="vercel"] .admin-plus-topbar {
+  background: #ffffff;
+  border-bottom: 1px solid #ebebeb;
+  padding: 0 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 56px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+[data-ap-theme="vercel"] .admin-plus-header-left {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+}
+[data-ap-theme="vercel"] .admin-plus-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+[data-ap-theme="vercel"] .admin-plus-brand-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: #2d2d2d;
+}
+[data-ap-theme="vercel"] .admin-plus-brand-name {
+  font-size: 14px; font-weight: 600; color: #171717; letter-spacing: -.02em;
+}
+[data-ap-theme="vercel"] .admin-plus-nav {
+  display: flex; gap: 2px; background: #f0f0f0; border-radius: 8px; padding: 3px;
+}
+[data-ap-theme="vercel"] .admin-plus-tab {
+  background: transparent; border: none; color: #4d4d4d;
+  padding: 6px 14px; cursor: pointer; font-size: 13px; font-weight: 500;
+  border-radius: 6px; transition: background .12s, color .12s;
+}
+[data-ap-theme="vercel"] .admin-plus-tab:hover { color: #171717; background: #e5e5e5; }
+[data-ap-theme="vercel"] .admin-plus-tab.active {
+  background: #ffffff; color: #171717;
+  box-shadow: 0 1px 1px rgba(0,0,0,.03), 0 2px 2px rgba(0,0,0,.05);
+}
+[data-ap-theme="vercel"] .admin-plus-main {
+  padding: 40px 32px; max-width: 1200px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 24px;
+}
+[data-ap-theme="vercel"] .admin-plus-status {
+  color: #4d4d4d; font-size: 12px; display: flex; align-items: center; gap: 8px;
+  font-family: 'JetBrains Mono','Fira Code',monospace;
+}
+[data-ap-theme="vercel"] .admin-plus-status::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%; background: #22c55e;
+}
+[data-ap-theme="vercel"] .admin-plus-btn {
+  background: #2d2d2d; border: none; color: #ffffff; padding: 8px 16px;
+  border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+[data-ap-theme="vercel"] .admin-plus-btn:hover { background: #4a4a4a; }
+[data-ap-theme="vercel"] .admin-plus-btn.secondary {
+  background: #ffffff; border: 1px solid #d4d4d4; color: #171717;
+}
+[data-ap-theme="vercel"] .admin-plus-btn.secondary:hover { background: #f5f5f5; }
+[data-ap-theme="vercel"] .admin-plus-btn.warn {
+  background: #ffffff; border: 1px solid #ee0000; color: #ee0000;
+}
+[data-ap-theme="vercel"] .admin-plus-btn.warn:hover { background: #fff0f0; }
+[data-ap-theme="vercel"] .admin-plus-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+[data-ap-theme="vercel"] .admin-plus-card {
+  background: #ffffff; border: 1px solid #ebebeb; border-radius: 8px;
+  padding: 24px;
+  box-shadow: 0 1px 1px rgba(0,0,0,.02), 0 2px 2px rgba(0,0,0,.04);
+}
+[data-ap-theme="vercel"] .admin-plus-card h4 {
+  color: #4d4d4d; font-size: 11px; font-weight: 500;
+  text-transform: uppercase; letter-spacing: .6px; margin: 0 0 10px;
+  font-family: 'JetBrains Mono','Fira Code',monospace;
+}
+[data-ap-theme="vercel"] .admin-plus-card strong {
+  color: #171717; font-size: 32px; font-weight: 600; letter-spacing: -.03em;
+}
+[data-ap-theme="vercel"] .admin-plus-panel {
+  background: #ffffff; border: 1px solid #ebebeb; border-radius: 8px;
+  padding: 28px;
+  box-shadow: 0 1px 1px rgba(0,0,0,.02), 0 2px 2px rgba(0,0,0,.04);
+}
+[data-ap-theme="vercel"] .admin-plus-panel h3 {
+  color: #171717; font-size: 16px; font-weight: 600; letter-spacing: -.02em;
+  margin: 0 0 20px; padding-bottom: 12px; border-bottom: 1px solid #ebebeb;
+}
+[data-ap-theme="vercel"] .admin-plus-panel-header-wrap { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
+[data-ap-theme="vercel"] .admin-plus-table { font-family: 'JetBrains Mono','Fira Code',monospace; font-size: 12px; }
+[data-ap-theme="vercel"] .admin-plus-table th, [data-ap-theme="vercel"] .admin-plus-table td {
+  padding: 14px 16px; border-bottom: 1px solid #ebebeb;
+}
+[data-ap-theme="vercel"] .admin-plus-table th {
+  color: #171717; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .5px; background: #fafafa;
+}
+[data-ap-theme="vercel"] .admin-plus-table tr:hover td { background: #f5f5f5; }
+[data-ap-theme="vercel"] .admin-plus-table code {
+  background: #f5f5f5; color: #171717; padding: 3px 8px;
+  border-radius: 4px; font-size: 12px;
+}
+[data-ap-theme="vercel"] .admin-plus-badge {
+  background: #f5f5f5; color: #171717; padding: 3px 8px;
+  border-radius: 999px; font-size: 11px; font-weight: 500;
+  font-family: 'JetBrains Mono','Fira Code',monospace;
+}
+[data-ap-theme="vercel"] .admin-plus-badge.warn { background: #fff0f0; color: #ee0000; }
+[data-ap-theme="vercel"] .admin-plus-inline-input,
+[data-ap-theme="vercel"] .admin-plus-field input,
+[data-ap-theme="vercel"] .admin-plus-field select {
+  background: #ffffff; border: 1px solid #d4d4d4; color: #171717;
+  padding: 10px 12px; border-radius: 6px; font-size: 13px;
+  font-family: 'JetBrains Mono','Fira Code',monospace;
+}
+[data-ap-theme="vercel"] .admin-plus-inline-input:focus,
+[data-ap-theme="vercel"] .admin-plus-field input:focus,
+[data-ap-theme="vercel"] .admin-plus-field select:focus {
+  border-color: #171717; outline: none; box-shadow: 0 0 0 2px rgba(23,23,23,.08);
+}
+[data-ap-theme="vercel"] .admin-plus-empty {
+  color: #4d4d4d; font-size: 14px; padding: 40px 24px;
+}
+[data-ap-theme="vercel"] .admin-plus-detail-item {
+  background: #fafafa; border: 1px solid #ebebeb; border-radius: 6px; padding: 12px 14px;
+}
+[data-ap-theme="vercel"] .admin-plus-detail-item strong { color: #171717; }
+[data-ap-theme="vercel"] .admin-plus-link { color: #171717; text-decoration: underline; text-underline-offset: 3px; }
+[data-ap-theme="vercel"] .admin-plus-table-wrap { border: 1px solid #ebebeb; border-radius: 6px; }
+[data-ap-theme="vercel"] .admin-plus-theme-switcher { background: #f5f5f5; border: 1px solid #ebebeb; border-radius: 8px; }
+[data-ap-theme="vercel"] .admin-plus-theme-btn.active { background: #171717; color: #ffffff; }
+[data-ap-theme="vercel"] .admin-plus-field label {
+  color: #4d4d4d; font-family: 'JetBrains Mono','Fira Code',monospace; font-size: 10px;
+  text-transform: uppercase; letter-spacing: .5px;
+}
 
-#admin-plus-shell.admin-plus-open { transform:translateX(0); }
-#admin-plus-overlay.admin-plus-open { opacity:1;pointer-events:auto; }
+/* ═══════════════════════════════════════════════════════════════════
+   THEME 4: NOTION — Warm Editorial Workspace
+   ═══════════════════════════════════════════════════════════════════ */
+[data-ap-theme="notion"] {
+  --ap-bg: #ffffff;
+  --ap-surface: #f6f5f4;
+  --ap-surface-hover: #efefed;
+  --ap-border: #e5e3df;
+  --ap-text: #1a1a1a;
+  --ap-text-muted: #787671;
+  --ap-accent: #5645d4;
+  --ap-accent-glow: rgba(86,69,212,.08);
+  --ap-danger: #e03131;
+  --ap-success: #1aae39;
+  --ap-warn: #dd5b00;
+  --ap-radius: 12px;
+  --ap-radius-sm: 8px;
+  --ap-shadow: 0 1px 3px rgba(15,15,15,.04);
+  --ap-shadow-lg: 0 4px 12px rgba(15,15,15,.06), 0 8px 24px rgba(15,15,15,.04);
+  --ap-font: 'Inter',system-ui,-apple-system,sans-serif;
+  --ap-font-ui: 'Inter',system-ui,-apple-system,sans-serif;
+  --ap-border-accent: 1px solid #e5e3df;
+  --ap-card-border: 1px solid #e5e3df;
+  --ap-layout-sidebar: 64px;
+}
+[data-ap-theme="notion"] #admin-plus-shell {
+  background: #ffffff; color: #1a1a1a; display: flex; min-height: 100vh;
+  font-family: 'Inter',system-ui,-apple-system,sans-serif;
+}
+[data-ap-theme="notion"] .admin-plus-sidebar {
+  width: 64px; min-width: 64px; background: #f6f5f4;
+  height: 100vh; position: fixed; top: 0; left: 0;
+  display: flex; flex-direction: column; align-items: center;
+  padding: 14px 0; border-right: 1px solid #e5e3df; z-index: 50;
+}
+[data-ap-theme="notion"] .admin-plus-sidebar-brand {
+  width: 42px; height: 42px; background: #5645d4; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center; margin-bottom: 18px;
+}
+[data-ap-theme="notion"] .admin-plus-sidebar-brand svg { width: 22px; height: 22px; color: #ffffff; }
+[data-ap-theme="notion"] .admin-plus-sidebar-nav {
+  display: flex; flex-direction: column; gap: 4px; width: 100%; padding: 0 8px;
+}
+[data-ap-theme="notion"] .admin-plus-sidebar-tab {
+  width: 48px; height: 48px; background: transparent; border: none;
+  color: #787671; cursor: pointer; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  transition: background .12s, color .12s; margin: 0 auto;
+}
+[data-ap-theme="notion"] .admin-plus-sidebar-tab svg { width: 22px; height: 22px; }
+[data-ap-theme="notion"] .admin-plus-sidebar-tab:hover { background: #e8e7e4; color: #1a1a1a; }
+[data-ap-theme="notion"] .admin-plus-sidebar-tab.active { background: #5645d4; color: #ffffff; }
+[data-ap-theme="notion"] .admin-plus-main {
+  margin-left: 64px; flex: 1; display: flex; flex-direction: column;
+}
+[data-ap-theme="notion"] .admin-plus-topbar {
+  background: #ffffff; border-bottom: 1px solid #e5e3df;
+  padding: 0 28px; display: flex; align-items: center;
+  justify-content: space-between; height: 52px;
+}
+[data-ap-theme="notion"] .admin-plus-page-title {
+  font-size: 16px; font-weight: 600; color: #1a1a1a; letter-spacing: -.01em;
+}
+[data-ap-theme="notion"] .admin-plus-status {
+  color: #787671; font-size: 12px; display: flex; align-items: center; gap: 8px;
+}
+[data-ap-theme="notion"] .admin-plus-status::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%; background: #5645d4;
+}
+[data-ap-theme="notion"] .admin-plus-content {
+  padding: 28px; display: flex; flex-direction: column; gap: 20px;
+}
+[data-ap-theme="notion"] .admin-plus-btn {
+  background: #5645d4; border: none; color: #ffffff;
+  padding: 8px 16px; border-radius: 8px; cursor: pointer;
+  font-size: 13px; font-weight: 500;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+[data-ap-theme="notion"] .admin-plus-btn:hover { background: #4534b3; }
+[data-ap-theme="notion"] .admin-plus-btn.secondary {
+  background: transparent; border: 1px solid #c8c4be; color: #1a1a1a;
+}
+[data-ap-theme="notion"] .admin-plus-btn.secondary:hover { background: #efefed; }
+[data-ap-theme="notion"] .admin-plus-btn.warn {
+  background: transparent; border: 1px solid #e03131; color: #e03131;
+}
+[data-ap-theme="notion"] .admin-plus-btn.warn:hover { background: #fef2f2; }
+[data-ap-theme="notion"] .admin-plus-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+}
+[data-ap-theme="notion"] .admin-plus-card {
+  background: #ffffff; border: 1px solid #e5e3df; border-radius: 12px;
+  padding: 22px 24px;
+  box-shadow: 0 1px 3px rgba(15,15,15,.04);
+}
+[data-ap-theme="notion"] .admin-plus-card h4 {
+  color: #787671; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .5px; margin: 0 0 8px;
+}
+[data-ap-theme="notion"] .admin-plus-card strong {
+  color: #1a1a1a; font-size: 28px; font-weight: 600;
+}
+[data-ap-theme="notion"] .admin-plus-panel {
+  background: #ffffff; border: 1px solid #e5e3df; border-radius: 12px;
+  padding: 26px 28px;
+  box-shadow: 0 1px 3px rgba(15,15,15,.04);
+}
+[data-ap-theme="notion"] .admin-plus-panel h3 {
+  color: #1a1a1a; font-size: 16px; font-weight: 600;
+  margin: 0 0 18px; padding-bottom: 12px; border-bottom: 1px solid #e5e3df;
+}
+[data-ap-theme="notion"] .admin-plus-panel-header-wrap {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 4px;
+}
+[data-ap-theme="notion"] .admin-plus-table th,
+[data-ap-theme="notion"] .admin-plus-table td {
+  padding: 14px 16px; border-bottom: 1px solid #e5e3df; font-size: 13px;
+}
+[data-ap-theme="notion"] .admin-plus-table th {
+  color: #787671; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .5px; background: #f6f5f4;
+}
+[data-ap-theme="notion"] .admin-plus-table tr:hover td { background: #f6f5f4; }
+[data-ap-theme="notion"] .admin-plus-table code {
+  background: #f6f5f4; color: #5645d4; border: 1px solid #e5e3df;
+  padding: 3px 8px; border-radius: 4px; font-size: 12px;
+}
+[data-ap-theme="notion"] .admin-plus-badge {
+  background: rgba(86,69,212,.08); color: #5645d4;
+  padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600;
+}
+[data-ap-theme="notion"] .admin-plus-badge.warn {
+  background: rgba(224,49,49,.08); color: #e03131;
+}
+[data-ap-theme="notion"] .admin-plus-inline-input,
+[data-ap-theme="notion"] .admin-plus-field input,
+[data-ap-theme="notion"] .admin-plus-field select {
+  background: #ffffff; border: 1px solid #c8c4be; color: #1a1a1a;
+  padding: 10px 14px; border-radius: 8px; font-size: 13px;
+}
+[data-ap-theme="notion"] .admin-plus-inline-input:focus,
+[data-ap-theme="notion"] .admin-plus-field input:focus,
+[data-ap-theme="notion"] .admin-plus-field select:focus {
+  border-color: #5645d4; outline: none;
+  box-shadow: 0 0 0 2px rgba(86,69,212,.12);
+}
+[data-ap-theme="notion"] .admin-plus-empty {
+  color: #787671; font-size: 14px; padding: 40px 24px;
+}
+[data-ap-theme="notion"] .admin-plus-detail-item {
+  background: #f6f5f4; border: 1px solid #e5e3df; border-radius: 8px;
+  padding: 12px 14px;
+}
+[data-ap-theme="notion"] .admin-plus-detail-item strong { color: #5645d4; }
+[data-ap-theme="notion"] .admin-plus-table-wrap {
+  border: 1px solid #e5e3df; border-radius: 8px;
+}
+[data-ap-theme="notion"] .admin-plus-link { color: #5645d4; }
+[data-ap-theme="notion"] .admin-plus-link:hover { text-decoration: underline; }
+[data-ap-theme="notion"] .admin-plus-theme-switcher { background: #f6f5f4; border: 1px solid #e5e3df; border-radius: 10px; }
+[data-ap-theme="notion"] .admin-plus-theme-btn.active { background: #5645d4; color: #ffffff; }
+[data-ap-theme="notion"] .admin-plus-field label {
+  color: #787671; font-size: 11px; font-weight: 600; text-transform: none;
+  letter-spacing: 0;
+}
 
-#admin-plus-shell * { box-sizing:border-box; }
-.admin-plus-layout { display:grid;grid-template-columns:260px 1fr;height:100%; }
-
-.admin-plus-sidebar { background:var(--ap-bg-sidebar);padding:24px 20px;border-right:1px solid var(--ap-border);display:flex;flex-direction:column;gap:32px; }
-.admin-plus-brand { display:flex;flex-direction:column;gap:8px; }
-.admin-plus-title { font-size:20px;font-weight:700;letter-spacing:-0.02em;background:linear-gradient(to right, #60a5fa, #a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent; }
-.admin-plus-desc { font-size:13px;color:var(--ap-text-muted);line-height:1.4; }
-
-.admin-plus-nav { display:flex;flex-direction:column;gap:6px; }
-.admin-plus-tab { background:transparent;border:none;color:var(--ap-text-muted);padding:12px 16px;border-radius:var(--ap-radius-md);text-align:left;cursor:pointer;font-size:14px;font-weight:500;transition:all 0.2s;display:flex;align-items:center;gap:10px; }
-.admin-plus-tab svg { width:18px;height:18px;opacity:0.7;transition:opacity 0.2s; }
-.admin-plus-tab:hover { background:var(--ap-border-light);color:var(--ap-text-main); }
-.admin-plus-tab:hover svg { opacity:1; }
-.admin-plus-tab.active { background:var(--ap-primary);color:#fff;box-shadow:0 4px 12px rgba(59, 130, 246, 0.3); }
-.admin-plus-tab.active svg { opacity:1; }
-
-.admin-plus-main { padding:32px 40px;overflow-y:auto;display:flex;flex-direction:column;gap:24px; }
-#admin-plus-view { display:flex;flex-direction:column;gap:24px; }
-.admin-plus-topbar { display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px; }
-.admin-plus-header-text { font-size:24px;font-weight:600;margin-bottom:8px; }
-.admin-plus-status { font-size:13px;color:var(--ap-text-muted);display:flex;align-items:center;gap:8px; }
-.admin-plus-status::before { content:'';display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ap-primary);box-shadow:0 0 8px var(--ap-primary); }
-
-.admin-plus-actions { display:flex;gap:12px; }
-.admin-plus-btn { background:var(--ap-primary);border:1px solid transparent;color:#fff;padding:10px 16px;border-radius:var(--ap-radius-sm);cursor:pointer;font-weight:600;font-size:14px;transition:all 0.2s;display:inline-flex;align-items:center;justify-content:center;gap:6px; }
-.admin-plus-btn:hover { background:var(--ap-primary-hover);transform:translateY(-1px);box-shadow:0 4px 12px rgba(59, 130, 246, 0.3); }
-.admin-plus-btn.secondary { background:transparent;border-color:var(--ap-border);color:var(--ap-text-main); }
-.admin-plus-btn.secondary:hover { background:var(--ap-border-light);box-shadow:none; }
-.admin-plus-btn.warn { background:transparent;border-color:var(--ap-danger);color:var(--ap-danger); }
-.admin-plus-btn.warn:hover { background:var(--ap-danger);color:#fff;box-shadow:0 4px 12px rgba(239, 68, 68, 0.3); }
-.admin-plus-btn.tiny { padding:8px 12px;font-size:12px; }
-.admin-plus-close { width:36px;height:36px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:transparent;border:none;color:var(--ap-text-muted);cursor:pointer;font-size:20px;transition:all 0.2s; }
-.admin-plus-close:hover { background:var(--ap-border-light);color:var(--ap-text-main); }
-
-.admin-plus-grid { display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:16px; }
-.admin-plus-card { background:var(--ap-bg-panel);border:1px solid var(--ap-border);border-radius:var(--ap-radius-lg);padding:20px;box-shadow:var(--ap-shadow);transition:transform 0.2s, box-shadow 0.2s; }
-.admin-plus-card:hover { transform:translateY(-2px);box-shadow:0 8px 16px rgba(0,0,0,0.2); }
-.admin-plus-card h4 { margin:0 0 12px;font-size:13px;font-weight:500;color:var(--ap-text-muted);text-transform:uppercase;letter-spacing:0.05em; }
-.admin-plus-card strong { font-size:32px;font-weight:700;color:var(--ap-text-main);line-height:1; }
-
-.admin-plus-panel { background:var(--ap-bg-panel);border:1px solid var(--ap-border);border-radius:var(--ap-radius-lg);padding:24px;box-shadow:var(--ap-shadow);display:flex;flex-direction:column;gap:16px; }
-.admin-plus-panel h3 { margin:0;font-size:18px;font-weight:600;display:flex;align-items:center;justify-content:space-between; }
-.admin-plus-panel-header { display:flex;align-items:center;justify-content:space-between; }
-.admin-plus-panel-header h3 { margin:0; }
-.admin-plus-panel-header-wrap { display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap; }
-.admin-plus-toolbar { display:flex;gap:12px;flex-wrap:wrap;align-items:center; }
-.admin-plus-inline-input { min-width:260px;background:var(--ap-bg-input);border:1px solid var(--ap-border);color:var(--ap-text-main);border-radius:var(--ap-radius-sm);padding:12px 14px;font-size:14px;outline:none; }
-.admin-plus-inline-input:focus { border-color:var(--ap-primary);box-shadow:0 0 0 2px rgba(59,130,246,0.2); }
-.admin-plus-detail-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px; }
-.admin-plus-detail-item { padding:14px 16px;background:#111c31;border:1px solid rgba(148,163,184,0.14);border-radius:14px; }
-.admin-plus-detail-item strong { display:block;font-size:12px;color:#93c5fd;margin-bottom:8px; }
-.admin-plus-link { color:#93c5fd;text-decoration:none;word-break:break-all; }
-.admin-plus-link:hover { text-decoration:underline; }
-
-.admin-plus-table-wrap { overflow-x:auto;border:1px solid var(--ap-border);border-radius:var(--ap-radius-md); }
-.admin-plus-table { width:100%;border-collapse:collapse;font-size:14px;text-align:left; }
-.admin-plus-table th, .admin-plus-table td { padding:14px 16px;border-bottom:1px solid var(--ap-border); }
-.admin-plus-table th { color:var(--ap-text-muted);font-weight:600;background:rgba(15,23,42,0.4);font-size:13px;text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap; }
-.admin-plus-table tr:last-child td { border-bottom:none; }
-.admin-plus-table tr:hover td { background:rgba(255,255,255,0.02); }
-.admin-plus-table code { background:rgba(0,0,0,0.3);padding:4px 8px;border-radius:6px;font-family:'Fira Code', monospace;font-size:13px;color:#93c5fd; }
-
-.admin-plus-empty { padding:40px 20px;color:var(--ap-text-muted);text-align:center;font-size:14px;display:flex;flex-direction:column;align-items:center;gap:12px; }
-.admin-plus-empty::before { content:'\\2205';font-size:32px;opacity:0.5; }
-
-.admin-plus-form { display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:20px; }
-.admin-plus-field { display:flex;flex-direction:column;gap:8px; }
-.admin-plus-field label { font-size:13px;font-weight:500;color:var(--ap-text-muted); }
-.admin-plus-field input, .admin-plus-field select { background:var(--ap-bg-input);border:1px solid var(--ap-border);color:var(--ap-text-main);border-radius:var(--ap-radius-sm);padding:12px 14px;font-size:14px;transition:border-color 0.2s, box-shadow 0.2s;outline:none; }
-.admin-plus-field input:focus, .admin-plus-field select:focus { border-color:var(--ap-primary);box-shadow:0 0 0 2px rgba(59,130,246,0.2); }
+/* ═══════════════════════════════════════════════════════════════════
+   SHARED UTILITY STYLES (used by all themes)
+   ═══════════════════════════════════════════════════════════════════ */
+#admin-plus-shell * { box-sizing: border-box; }
+#admin-plus-view { display: flex; flex-direction: column; gap: 20px; }
+.admin-plus-main { padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
+.admin-plus-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.admin-plus-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.admin-plus-inline-input { min-width: 200px; padding: 8px 10px; font-size: 12px; outline: none; }
+.admin-plus-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 12px; }
+.admin-plus-detail-item { padding: 10px 12px; }
+.admin-plus-detail-item strong { display: block; font-size: 10px; margin-bottom: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+.admin-plus-link { color: var(--ap-accent); text-decoration: none; word-break: break-all; font-size: 12px; }
+.admin-plus-link:hover { text-decoration: underline; }
+.admin-plus-table-wrap { overflow-x: auto; margin-top: 4px; }
+.admin-plus-table { width: 100%; border-collapse: collapse; text-align: left; }
+.admin-plus-empty { padding: 32px 20px; color: var(--ap-text-muted); text-align: center; font-size: 13px; }
+.admin-plus-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
+.admin-plus-field { display: flex; flex-direction: column; gap: 5px; }
+.admin-plus-field label { font-size: 11px; font-weight: 600; color: var(--ap-text-muted); text-transform: uppercase; letter-spacing: .04em; }
+.admin-plus-field input, .admin-plus-field select { transition: border-color .2s, box-shadow .2s; }
 .admin-plus-field input[type="datetime-local"] { color-scheme: dark; }
-.admin-plus-field input[type="datetime-local"]::-webkit-calendar-indicator { filter: invert(1) brightness(2); cursor: pointer; opacity: 0.8; }
-.admin-plus-field input[type="datetime-local"]::-webkit-calendar-indicator:hover { opacity: 1; }
-.admin-plus-field input[type="datetime-local"]::-moz-calendar-picker-indicator { filter: invert(1) brightness(2); cursor: pointer; opacity: 0.8; }
-.admin-plus-field input[type="datetime-local"]::-moz-calendar-picker-indicator:hover { opacity: 1; }
-
-.admin-plus-badge { display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;background:rgba(59,130,246,0.15);color:#93c5fd;font-size:12px;font-weight:600;border:1px solid rgba(59,130,246,0.3); }
-.admin-plus-badge.warn { background:rgba(239,68,68,0.12);color:#fca5a5;border-color:rgba(239,68,68,0.28); }
-.admin-plus-badge.muted { background:rgba(148,163,184,0.12);color:#cbd5e1;border-color:rgba(148,163,184,0.24); }
-
-@media (max-width:768px) {
-  .admin-plus-layout { grid-template-columns:1fr;grid-template-rows:auto 1fr; }
-  .admin-plus-sidebar { padding:16px;border-right:none;border-bottom:1px solid var(--ap-border);gap:16px; }
-  .admin-plus-nav { flex-direction:row;overflow-x:auto;padding-bottom:8px; }
-  .admin-plus-tab { white-space:nowrap; }
-  .admin-plus-main { padding:20px 16px; }
+.admin-plus-field input[type="datetime-local"]::-webkit-calendar-indicator { filter: invert(1) brightness(2); cursor: pointer; opacity: .8; }
+.admin-plus-desc { font-size: 11px; color: var(--ap-text-muted); line-height: 1.5; }
+.admin-plus-panel-header-wrap { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.admin-plus-btn.tiny { padding: 5px 8px; font-size: 11px; }
+.admin-plus-theme-switcher { display: flex; gap: 2px; background: var(--ap-bg); border: var(--ap-border-accent); border-radius: var(--ap-radius); padding: 3px; }
+.admin-plus-theme-btn { background: transparent; border: none; color: var(--ap-text-muted); padding: 5px 10px; border-radius: var(--ap-radius-sm); cursor: pointer; font-size: 11px; font-weight: 600; transition: all .15s; letter-spacing: .02em; }
+.admin-plus-theme-btn:hover { color: var(--ap-text); background: var(--ap-surface-hover); }
+.admin-plus-theme-btn.active { background: var(--ap-accent); color: var(--theme-btn-color, #fff); }
+[data-ap-theme="spacex"] .admin-plus-theme-btn.active { color: #000; }
+@media(max-width:768px) {
+  [data-ap-theme="spotify"] .admin-plus-sidebar { display: none; }
+  [data-ap-theme="spotify"] .admin-plus-main { margin-left: 0; padding: 16px; }
+  [data-ap-theme="notion"] .admin-plus-sidebar { display: none; }
+  [data-ap-theme="notion"] .admin-plus-main { margin-left: 0; }
+  .admin-plus-main { padding: 14px; }
+  .admin-plus-grid { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
 }
 </style>
-<div id="admin-plus-overlay" aria-hidden="true"></div>
-<button id="admin-plus-fab" type="button">
-  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
-  安全管理
-</button>
-<aside id="admin-plus-shell" data-admin-plus-root="true" aria-hidden="true">
-  <div class="admin-plus-layout">
-    <div class="admin-plus-sidebar">
-      <div class="admin-plus-brand">
-        <div class="admin-plus-title">安全模块控制台</div>
-        <div class="admin-plus-desc">无侵入式的独立防护面板</div>
-      </div>
-      <div class="admin-plus-nav">
-        <button class="admin-plus-tab active" data-tab="overview" type="button">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" /></svg>
-          总览
-        </button>
-        <button class="admin-plus-tab" data-tab="users" type="button">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" /></svg>
-          UUID 授权
-        </button>
-        <button class="admin-plus-tab" data-tab="events" type="button">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zM3.75 12h.007v.008H3.75V12zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm-.375 5.25h.007v.008H3.75v-.008zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" /></svg>
-          审计日志
-        </button>
-        <button class="admin-plus-tab" data-tab="registration" type="button">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" /></svg>
-          注册管控
-        </button>
-        <button class="admin-plus-tab" data-tab="config" type="button">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 011.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.893.149c-.425.07-.765.383-.93.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 01-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.397.165-.71-.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 01-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.505-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.107-1.204l-.527-.738a1.125 1.125 0 01.12-1.45l.773-.773a1.125 1.125 0 011.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-          策略配置
-        </button>
-      </div>
-    </div>
-    <div class="admin-plus-main">
-      <div class="admin-plus-topbar">
-        <div>
-          <div class="admin-plus-header-text" id="admin-plus-page-title">总览</div>
-          <div class="admin-plus-status" id="admin-plus-status">等待加载...</div>
-        </div>
-        <div class="admin-plus-actions">
-          <button class="admin-plus-btn secondary" id="admin-plus-refresh" type="button">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:16px;height:16px;"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
-            刷新
-          </button>
-          <button class="admin-plus-close" id="admin-plus-close" type="button" aria-label="关闭">×</button>
-        </div>
-      </div>
-      <div id="admin-plus-view"></div>
-    </div>
-  </div>
-</aside>
+<div id="admin-plus-shell" data-admin-plus-root="true" data-ap-theme="spacex" style="min-height:100vh">
+  <div class="admin-plus-layout"><div class="admin-plus-main"><div class="admin-plus-panel"><div class="admin-plus-empty">Loading security console...</div></div></div></div>
+</div>
 <script id="admin-plus-script">
 (function(){
   if(window.__adminPlusInjected) return;
   window.__adminPlusInjected = true;
+  try {
   const defaultConfigPreset = {
     enabled: true,
     endpoint_ip_second: 60,
@@ -6663,21 +7489,259 @@ function 生成安全管理后台注入代码() {
     subscription_unique_ip_alert_limit: 6,
     register_enabled: false,
     register_schedule_enabled: false,
-    register_start_at: '',
-    register_end_at: ''
+    register_start_at: ''
   };
+  const tgDefaultSettings = { botToken: '', chatId: '', securityNotifyEnabled: false };
   const shell = document.getElementById('admin-plus-shell');
-  const overlay = document.getElementById('admin-plus-overlay');
-  const fab = document.getElementById('admin-plus-fab');
-  const closeBtn = document.getElementById('admin-plus-close');
-  const refreshBtn = document.getElementById('admin-plus-refresh');
-  const statusEl = document.getElementById('admin-plus-status');
-  const titleEl = document.getElementById('admin-plus-page-title');
-  const viewEl = document.getElementById('admin-plus-view');
-  const tabs = Array.from(document.querySelectorAll('.admin-plus-tab'));
-  const state = { tab: 'overview', overview: null, users: null, usersSummary: null, userSearch: '', userStatusFilter: 'all', selectedUserUuid: null, selectedUserUuids: [], userAudit: [], events: null, config: null, registration: null, usersCursor: null, usersHasMore: false };
+  if (!shell) { document.querySelector('.admin-plus-layout') && (document.querySelector('.admin-plus-layout').innerHTML = '<div class="admin-plus-panel"><div class="admin-plus-empty">Shell element not found.</div></div>'); return; }
+  const layoutEl = shell.querySelector('.admin-plus-layout');
+  const state = { tab: 'overview', overview: null, users: null, usersSummary: null, userSearch: '', userStatusFilter: 'all', selectedUserUuid: null, selectedUserUuids: [], userAudit: [], config: null, registration: null, usersCursor: null, usersHasMore: false, theme: 'spacex', tgState: { botToken: '', chatId: '', panelId: 'A', securityNotifyEnabled: false } };
   const cacheTime = {};
-  const cacheTTL = { overview: 8000, users: 15000, events: 8000, config: 20000, registration: 10000 };
+  const cacheTTL = { overview: 8000, users: 15000, config: 20000, registration: 10000 };
+
+  const layouts = {
+    spacex: function() {
+      return '<div class="admin-plus-cmd-bar">' +
+        '<div style="display:flex;align-items:center;gap:16px">' +
+          '<span class="admin-plus-cmd-title">SECURITY CONSOLE</span>' +
+          '<span class="admin-plus-cmd-prompt">&gt;_</span>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:12px">' +
+          '<span class="admin-plus-cmd-time" id="admin-plus-clock"></span>' +
+          '<div class="admin-plus-theme-switcher">' +
+            '<button class="admin-plus-theme-btn active" data-theme="spacex" type="button">SPX</button>' +
+            '<button class="admin-plus-theme-btn" data-theme="spotify" type="button">SPY</button>' +
+            '<button class="admin-plus-theme-btn" data-theme="vercel" type="button">VRC</button>' +
+            '<button class="admin-plus-theme-btn" data-theme="notion" type="button">NTN</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="admin-plus-nav">' +
+        '<button class="admin-plus-tab active" data-tab="overview" type="button">OVERVIEW</button>' +
+        '<button class="admin-plus-tab" data-tab="users" type="button">UUID AUTH</button>' +
+        '<button class="admin-plus-tab" data-tab="registration" type="button">REG CTRL</button>' +
+        '<button class="admin-plus-tab" data-tab="config" type="button">POLICY</button>' +
+      '</div>' +
+      '<div class="admin-plus-status" id="admin-plus-status">INITIALIZING...</div>' +
+      '<div class="admin-plus-main"><div id="admin-plus-view"></div></div>';
+    },
+    spotify: function() {
+      return '<div class="admin-plus-sidebar">' +
+        '<div class="admin-plus-sidebar-brand"><h1>Security</h1></div>' +
+        '<div class="admin-plus-sidebar-nav">' +
+          '<button class="admin-plus-sidebar-tab active" data-tab="overview" type="button">' +
+            '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z"/></svg>' +
+            '<span>Overview</span>' +
+          '</button>' +
+          '<button class="admin-plus-sidebar-tab" data-tab="users" type="button">' +
+            '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z"/></svg>' +
+            '<span>UUID Auth</span>' +
+          '</button>' +
+          '<button class="admin-plus-sidebar-tab" data-tab="registration" type="button">' +
+            '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z"/></svg>' +
+            '<span>Registration</span>' +
+          '</button>' +
+          '<button class="admin-plus-sidebar-tab" data-tab="config" type="button">' +
+            '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.154c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.252l1.148 1.148a1.125 1.125 0 01-.26 1.622l-.733.558a1.125 1.125 0 01-1.042.242l-1.074-.428a1.125 1.125 0 00-1.217.548l-1.207 1.04a1.125 1.125 0 01-1.62-.948V19.5a1.5 1.5 0 01-1.5-1.5v-1.125a1.125 1.125 0 00-1.012-1.125H9.3a1.125 1.125 0 00-1.125.625l-.77 1.236a1.125 1.125 0 01-1.115 1.004H7.5a1.5 1.5 0 01-1.5-1.5v-1.5a1.5 1.5 0 011.372-1.47l1.04-.77a1.125 1.125 0 011.004-1.115h1.43c.542 0 1.02-.398 1.11-.94l.213-1.28c.064-.375.313-.687.646-.87a.626.626 0 00.22-.128l.01-.011z"/></svg>' +
+            '<span>Policy</span>' +
+          '</button>' +
+        '</div>' +
+        '<div style="padding:16px;border-top:1px solid #282828;margin-top:auto">' +
+          '<div class="admin-plus-theme-switcher" style="flex-wrap:wrap;gap:4px">' +
+            '<button class="admin-plus-theme-btn" data-theme="spacex" type="button">SPX</button>' +
+            '<button class="admin-plus-theme-btn active" data-theme="spotify" type="button">SPY</button>' +
+            '<button class="admin-plus-theme-btn" data-theme="vercel" type="button">VRC</button>' +
+            '<button class="admin-plus-theme-btn" data-theme="notion" type="button">NTN</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="admin-plus-main">' +
+        '<div class="admin-plus-topbar">' +
+          '<div class="admin-plus-status" id="admin-plus-status">Loading...</div>' +
+          '<button class="admin-plus-btn secondary" id="admin-plus-refresh" type="button">' +
+            '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:14px;height:14px"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>Refresh' +
+          '</button>' +
+        '</div>' +
+        '<div id="admin-plus-view"></div>' +
+      '</div>';
+    },
+    vercel: function() {
+      return '<div class="admin-plus-topbar">' +
+        '<div class="admin-plus-header-left">' +
+          '<div class="admin-plus-brand">' +
+            '<div class="admin-plus-brand-dot"></div>' +
+            '<span class="admin-plus-brand-name">Security Console</span>' +
+          '</div>' +
+          '<div class="admin-plus-nav">' +
+            '<button class="admin-plus-tab active" data-tab="overview" type="button">Overview</button>' +
+            '<button class="admin-plus-tab" data-tab="users" type="button">UUID Auth</button>' +
+            '<button class="admin-plus-tab" data-tab="registration" type="button">Registration</button>' +
+            '<button class="admin-plus-tab" data-tab="config" type="button">Policy</button>' +
+          '</div>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:12px">' +
+          '<div class="admin-plus-theme-switcher">' +
+            '<button class="admin-plus-theme-btn" data-theme="spacex" type="button">SPX</button>' +
+            '<button class="admin-plus-theme-btn" data-theme="spotify" type="button">SPY</button>' +
+            '<button class="admin-plus-theme-btn active" data-theme="vercel" type="button">VRC</button>' +
+            '<button class="admin-plus-theme-btn" data-theme="notion" type="button">NTN</button>' +
+          '</div>' +
+          '<button class="admin-plus-btn secondary" id="admin-plus-refresh" type="button">Refresh</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="admin-plus-main">' +
+        '<div class="admin-plus-status" id="admin-plus-status">Ready</div>' +
+        '<div id="admin-plus-view"></div>' +
+      '</div>';
+    },
+    notion: function() {
+      return '<div class="admin-plus-sidebar">' +
+        '<div class="admin-plus-sidebar-brand">' +
+          '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>' +
+        '</div>' +
+        '<div class="admin-plus-sidebar-nav">' +
+          '<button class="admin-plus-sidebar-tab active" data-tab="overview" type="button" title="Overview">' +
+            '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z"/></svg>' +
+          '</button>' +
+          '<button class="admin-plus-sidebar-tab" data-tab="users" type="button" title="UUID Auth">' +
+            '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z"/></svg>' +
+          '</button>' +
+          '<button class="admin-plus-sidebar-tab" data-tab="registration" type="button" title="Registration">' +
+            '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z"/></svg>' +
+          '</button>' +
+          '<button class="admin-plus-sidebar-tab" data-tab="config" type="button" title="Policy">' +
+            '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.154c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.252l1.148 1.148a1.125 1.125 0 01-.26 1.622l-.733.558a1.125 1.125 0 01-1.042.242l-1.074-.428a1.125 1.125 0 00-1.217.548l-1.207 1.04a1.125 1.125 0 01-1.62-.948V19.5a1.5 1.5 0 01-1.5-1.5v-1.125a1.125 1.125 0 00-1.012-1.125H9.3a1.125 1.125 0 00-1.125.625l-.77 1.236a1.125 1.125 0 01-1.115 1.004H7.5a1.5 1.5 0 01-1.5-1.5v-1.5a1.5 1.5 0 011.372-1.47l1.04-.77a1.125 1.125 0 011.004-1.115h1.43c.542 0 1.02-.398 1.11-.94l.213-1.28c.064-.375.313-.687.646-.87a.626.626 0 00.22-.128l.01-.011z"/></svg>' +
+          '</button>' +
+        '</div>' +
+        '<div style="margin-top:auto;padding:8px">' +
+          '<div class="admin-plus-theme-switcher" style="flex-wrap:wrap;gap:4px;justify-content:center">' +
+            '<button class="admin-plus-theme-btn" data-theme="spacex" type="button" title="SpaceX">SPX</button>' +
+            '<button class="admin-plus-theme-btn" data-theme="spotify" type="button" title="Spotify">SPY</button>' +
+            '<button class="admin-plus-theme-btn" data-theme="vercel" type="button" title="Vercel">VRC</button>' +
+            '<button class="admin-plus-theme-btn active" data-theme="notion" type="button" title="Notion">NTN</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="admin-plus-main">' +
+        '<div class="admin-plus-topbar">' +
+          '<span class="admin-plus-page-title" id="admin-plus-page-title">Overview</span>' +
+          '<div style="display:flex;align-items:center;gap:12px">' +
+            '<div class="admin-plus-status" id="admin-plus-status">Ready</div>' +
+            '<button class="admin-plus-btn secondary" id="admin-plus-refresh" type="button" style="padding:6px 12px;font-size:12px">Refresh</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="admin-plus-content" id="admin-plus-content">' +
+          '<div id="admin-plus-view"></div>' +
+        '</div>' +
+      '</div>';
+    }
+  };
+
+  function getTabSelector(theme) {
+    if (theme === 'spotify' || theme === 'notion') return '.admin-plus-sidebar-tab';
+    return '.admin-plus-tab';
+  }
+
+  function getRefreshBtn(theme) {
+    return document.getElementById('admin-plus-refresh');
+  }
+
+  function getStatusEl(theme) {
+    return document.getElementById('admin-plus-status');
+  }
+
+  function getViewEl(theme) {
+    return document.getElementById('admin-plus-view');
+  }
+
+  let _clockInterval = null;
+  const _themeBodyBg = { spacex: '#000000', spotify: '#121212', vercel: '#fafafa', notion: '#ffffff' };
+
+  function applyTheme(newTheme) {
+    if (_clockInterval) { clearInterval(_clockInterval); _clockInterval = null; }
+
+    const bodyBg = _themeBodyBg[newTheme] || '#000000';
+    const isLight = newTheme === 'vercel' || newTheme === 'notion';
+    document.body.style.backgroundColor = bodyBg;
+    document.body.style.color = isLight ? '#1a1a1a' : '#ffffff';
+    document.body.style.setProperty('--ap-body-bg', bodyBg);
+    document.body.style.setProperty('--ap-body-text', isLight ? '#1a1a1a' : '#ffffff');
+    document.body.style.setProperty('--ap-body-muted', isLight ? '#787671' : '#888888');
+    document.body.style.setProperty('--ap-body-border', isLight ? '#d4d4d4' : '#333333');
+
+    const navbar = document.getElementById('admin-plus-navbar');
+    if (navbar) { navbar.style.marginLeft = (newTheme === 'spotify' ? '220px' : newTheme === 'notion' ? '64px' : '0px'); }
+
+    shell.dataset.apTheme = newTheme;
+    layoutEl.innerHTML = layouts[newTheme]();
+    state.theme = newTheme;
+    layoutEl.setAttribute('data-applied', newTheme);
+    try { localStorage.setItem('ap-theme', newTheme); } catch(e) {}
+
+    const refreshBtn = getRefreshBtn(newTheme);
+    if (refreshBtn) refreshBtn.addEventListener('click', () => loadTab(state.tab, true));
+
+    const ofs = state.theme === 'spotify' || state.theme === 'notion' ? 'sidebar' : 'topbar';
+    const selector = ofs === 'sidebar' ? '.admin-plus-sidebar-tab' : '.admin-plus-tab';
+    const tabs = Array.from(document.querySelectorAll(selector));
+    tabs.forEach((tabBtn) => tabBtn.addEventListener('click', async () => {
+      tabs.forEach(item => item.classList.remove('active'));
+      tabBtn.classList.add('active');
+      state.tab = tabBtn.dataset.tab;
+      if (state.theme === 'notion') {
+        const titleMap = { overview: 'Overview', users: 'UUID Auth', registration: 'Registration', config: 'Policy' };
+        const titleEl = document.getElementById('admin-plus-page-title');
+        if (titleEl) titleEl.textContent = titleMap[state.tab] || state.tab;
+      }
+      await loadTab(state.tab, false);
+    }));
+
+    const themeBtns = Array.from(document.querySelectorAll('.admin-plus-theme-btn'));
+    themeBtns.forEach((btn) => btn.addEventListener('click', () => {
+      if (btn.dataset.theme && btn.dataset.theme !== state.theme) {
+        applyTheme(btn.dataset.theme);
+      }
+    }));
+
+    if (newTheme === 'spacex') {
+      const clockEl = document.getElementById('admin-plus-clock');
+      if (clockEl) {
+        const updateClock = () => {
+          if (clockEl) clockEl.textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
+        };
+        updateClock();
+        _clockInterval = setInterval(updateClock, 1000);
+      }
+    }
+
+    loadTab(state.tab, false);
+  }
+
+  function setStatus(text) {
+    const el = getStatusEl(state.theme);
+    if (el) el.textContent = text;
+  }
+
+  function loadTheme() {
+    try {
+      const saved = localStorage.getItem('ap-theme');
+      if (saved && ['spacex','spotify','vercel','notion'].includes(saved)) {
+        applyTheme(saved);
+        return;
+      }
+    } catch(e) {}
+    applyTheme('spacex');
+  }
+  loadTheme();
+  setTimeout(function() {
+    var v = document.getElementById('admin-plus-view');
+    if (v && (!v.textContent || v.textContent.trim() === '')) {
+      v.innerHTML = '<div class="admin-plus-panel"><div class="admin-plus-empty" style="color:#f59e0b">Data loading timed out. Check browser console or network tab for errors.</div></div>';
+    }
+  }, 10000);
+  if (!layoutEl.hasAttribute('data-applied')) {
+    layoutEl.innerHTML = '<div class="admin-plus-main"><div class="admin-plus-panel"><div class="admin-plus-empty" style="color:#ef4444">Failed to apply theme.</div></div></div>';
+  }
 
   const fmtTime = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-';
   const toDatetimeLocal = (value) => {
@@ -6689,21 +7753,6 @@ function 生成安全管理后台注入代码() {
   };
   const escapeHtml = (value) => String(value == null ? '' : value)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-  const setStatus = (text) => { statusEl.textContent = text; };
-  const openPanel = () => { shell.classList.add('admin-plus-open'); overlay.classList.add('admin-plus-open'); shell.setAttribute('aria-hidden', 'false'); overlay.setAttribute('aria-hidden', 'false'); };
-  const closePanel = () => { shell.classList.remove('admin-plus-open'); overlay.classList.remove('admin-plus-open'); shell.setAttribute('aria-hidden', 'true'); overlay.setAttribute('aria-hidden', 'true'); };
-  fab.addEventListener('click', async () => { openPanel(); await loadTab(state.tab, false); });
-  closeBtn.addEventListener('click', closePanel);
-  overlay.addEventListener('click', closePanel);
-  refreshBtn.addEventListener('click', async () => loadTab(state.tab, true));
-  tabs.forEach((tabBtn) => tabBtn.addEventListener('click', async () => {
-    tabs.forEach(item => item.classList.remove('active'));
-    tabBtn.classList.add('active');
-    state.tab = tabBtn.dataset.tab;
-    titleEl.textContent = tabBtn.textContent.trim();
-    await loadTab(state.tab, false);
-  }));
-
   async function api(url, options) {
     const resp = await fetch(url, Object.assign({ headers: { 'Content-Type': 'application/json' } }, options || {}));
     const text = await resp.text();
@@ -6716,7 +7765,6 @@ function 生成安全管理后台注入代码() {
   function hasTabData(tab) {
     if (tab === 'overview') return !!state.overview;
     if (tab === 'users') return Array.isArray(state.users);
-    if (tab === 'events') return Array.isArray(state.events);
     if (tab === 'config') return !!state.config;
     if (tab === 'registration') return !!state.registration;
     return false;
@@ -6752,15 +7800,20 @@ function 生成安全管理后台注入代码() {
         syncSelectedUsers(state.users);
         await loadUserAudit();
       }
-      if (tab === 'events') state.events = (await api('/admin/system/events?limit=25')).events || [];
-      if (tab === 'config' || !state.config) state.config = (await api('/admin/system/config.json')).config || (await api('/admin/system/config.json'));
+      if (tab === 'config' || !state.config) {
+        state.config = (await api('/admin/system/config.json')).config || (await api('/admin/system/config.json'));
+      }
+      if (tab === 'config') {
+        try { const tg = await api('/admin/system/tg-config'); state.tgState = { botToken: tg.botToken || '', chatId: tg.chatId || '', panelId: tg.panelId || 'A', securityNotifyEnabled: !!tg.securityNotifyEnabled }; } catch(e) {}
+      }
       if (tab === 'registration') state.registration = await api('/admin/system/registration');
       cacheTime[tab] = Date.now();
       render();
       setStatus('最后更新: ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }));
     } catch (error) {
       setStatus('加载失败: ' + error.message);
-      viewEl.innerHTML = '<div class="admin-plus-panel"><div class="admin-plus-empty">' + escapeHtml(error.message) + '</div></div>';
+      const viewEl = getViewEl(state.theme);
+      if (viewEl) viewEl.innerHTML = '<div class="admin-plus-panel"><div class="admin-plus-empty">' + escapeHtml(error.message) + '</div></div>';
     }
   }
 
@@ -6859,13 +7912,11 @@ function 生成安全管理后台注入代码() {
     const summary = state.overview && state.overview.summary ? state.overview.summary : {};
     const recentEvents = (state.overview && state.overview.recentEvents) || [];
     const activeBans = (state.overview && state.overview.activeBans) || [];
-    const activeCooldowns = (state.overview && state.overview.activeCooldowns) || [];
     const topSubscriptionRisks = (state.overview && state.overview.topSubscriptionRisks) || [];
     return [
       '<div class="admin-plus-grid">',
       card('授权 UUID 数', summary.userCount || 0),
       card('活动封禁', summary.activeBanCount || 0),
-      card('临时冷却', summary.activeCooldownCount || 0),
       card('审计事件', summary.recentEventCount || 0),
       card('高风险订阅', summary.highRiskSubscriptionCount || 0),
       card('防御状态', state.config && state.config.enabled ? '已开启' : '已关闭'),
@@ -6885,14 +7936,6 @@ function 生成安全管理后台注入代码() {
         escapeHtml((item.reasonType || '-') + ' / ' + (item.reasonDetail || '-')),
         escapeHtml(fmtTime(item.expiresAt)),
         '<button class="admin-plus-btn warn" data-unban="' + escapeHtml(item.subjectType) + '" data-subject="' + escapeHtml(item.subjectId) + '">强制解封</button>'
-      ])),
-      '</div>',
-      '<div class="admin-plus-panel"><h3>活动冷却 (观察名单)</h3>',
-      renderTable(['限制主体', '冷却原因', '恢复时间', '操作管控'], activeCooldowns.map(item => [
-        '<code>' + escapeHtml(item.subjectType + ':' + item.subjectId) + '</code>',
-        escapeHtml((item.reasonType || '-') + ' / ' + (item.reasonDetail || '-')),
-        escapeHtml(fmtTime(item.expiresAt)),
-        '<button class="admin-plus-btn warn" data-unban="' + escapeHtml(item.subjectType) + '" data-subject="' + escapeHtml(item.subjectId) + '">清除状态</button>'
       ])),
       '</div>',
       '<div class="admin-plus-panel"><h3>最新安全事件</h3>',
@@ -6992,21 +8035,8 @@ function 生成安全管理后台注入代码() {
     ].join('');
   }
 
-  function renderEvents() {
-    return '<div class="admin-plus-panel"><h3>全量安全审计日志</h3>' + renderTable(
-      ['记录时间', '事件类型', '触发主体', '来源 IP', '访问接口', '原始报文'],
-      state.events.map(item => [
-        escapeHtml(fmtTime(item.createdAt)),
-        '<span class="admin-plus-badge">' + escapeHtml(item.eventType || '-') + '</span>',
-        '<code>' + escapeHtml((item.subjectType || '-') + ':' + (item.subjectId || '-')) + '</code>',
-        escapeHtml(item.ip || '-'),
-        escapeHtml(item.endpoint || '-'),
-        '<code>' + escapeHtml(JSON.stringify(item.payload || {})) + '</code>'
-      ])
-    ) + '</div>';
-  }
-
   function renderConfig() {
+    const tgState = state.tgState || {};
     const cfg = state.config || {};
     const endpoint = (cfg.thresholds && cfg.thresholds.endpoint) || {};
     const ip = (cfg.thresholds && cfg.thresholds.ip) || {};
@@ -7018,7 +8048,7 @@ function 生成安全管理后台注入代码() {
     const registerStatus = !register.enabled
       ? '当前注册入口已关闭'
       : (register.scheduleEnabled
-        ? ('当前启用定时注册窗口' + (register.startAt ? '，开始于 ' + fmtTime(register.startAt) : '') + (register.endAt ? '，结束于 ' + fmtTime(register.endAt) : ''))
+        ? ('当前启用定时注册窗口' + (register.startAt ? '，开始于 ' + fmtTime(register.startAt) : ''))
         : '当前注册入口已手动开放');
     return '<div class="admin-plus-panel"><h3>防御策略参数</h3><div class="admin-plus-empty" style="padding:16px 20px;align-items:flex-start;text-align:left">注册控制：' + escapeHtml(registerStatus) + '。关闭时新用户无法注册，已注册用户仍可登录。</div><form id="admin-plus-config-form" class="admin-plus-form">' +
       field('enabled','安全模块总开关', enabledValue, 'select', [{label:'启用防御',value:'true'},{label:'停用防御',value:'false'}]) +
@@ -7034,8 +8064,26 @@ function 生成安全管理后台注入代码() {
       field('register_enabled','注册入口总开关', typeof register.enabled === 'boolean' ? (register.enabled ? 'true' : 'false') : (defaultConfigPreset.register_enabled ? 'true' : 'false'), 'select', [{label:'开放注册',value:'true'},{label:'关闭注册',value:'false'}]) +
       field('register_schedule_enabled','启用定时注册', typeof register.scheduleEnabled === 'boolean' ? (register.scheduleEnabled ? 'true' : 'false') : (defaultConfigPreset.register_schedule_enabled ? 'true' : 'false'), 'select', [{label:'启用定时',value:'true'},{label:'关闭定时',value:'false'}]) +
       field('register_start_at','定时开放开始时间', toDatetimeLocal(register.startAt || defaultConfigPreset.register_start_at), 'datetime-local') +
-      field('register_end_at','定时开放结束时间', toDatetimeLocal(register.endAt || defaultConfigPreset.register_end_at), 'datetime-local') +
-      '</form><div class="admin-plus-actions" style="margin-top:20px;border-top:1px solid var(--ap-border);padding-top:20px"><button class="admin-plus-btn secondary" id="admin-plus-reset-defaults" type="button">重置为推荐值</button><button class="admin-plus-btn" id="admin-plus-save-config" type="button">应用并保存配置</button></div></div>';
+      '<div class="admin-plus-field"><label>持续时长（小时）</label><select name="register_duration"><option value="">不使用定时</option>' +
+        [{v:'0.5',l:'0.5 小时'},{v:'1',l:'1 小时'},{v:'2',l:'2 小时'},{v:'4',l:'4 小时'},{v:'8',l:'8 小时'},{v:'12',l:'12 小时'},{v:'24',l:'24 小时'}]
+          .map(o => '<option value="' + o.v + '">' + o.l + '</option>').join('') +
+      '</select></div>' +
+      '</form><div class="admin-plus-actions" style="margin-top:20px;border-top:1px solid var(--ap-border);padding-top:20px"><button class="admin-plus-btn secondary" id="admin-plus-reset-defaults" type="button">重置为推荐值</button><button class="admin-plus-btn" id="admin-plus-save-config" type="button">应用并保存配置</button></div></div>' +
+      '<div class="admin-plus-panel" style="margin-top:0"><h3>TG Bot 通知设置</h3>' +
+      '<div class="admin-plus-desc" style="margin-bottom:16px">设置 Telegram Bot 后，封禁/解封等安全事件将自动通知到你的 TG 群组，并可发送 /banned、/unban 等命令管理用户。</div>' +
+      '<form id="admin-plus-tg-form" class="admin-plus-form">' +
+        field('tg_bot_token', 'Bot Token', tgState.botToken, 'text') +
+        field('tg_chat_id', 'Chat ID', tgState.chatId, 'text') +
+        field('tg_panel', '当前面板', tgState.panelId === 'B' ? 'B' : 'A', 'select', [{label:'面板A',value:'A'},{label:'面板B',value:'B'}]) +
+        field('tg_security_notify', '安全事件通知', tgState.securityNotifyEnabled ? 'true' : 'false', 'select', [{label:'开启通知',value:'true'},{label:'关闭通知',value:'false'}]) +
+      '</form>' +
+      '<div class="admin-plus-actions" style="margin-top:16px">' +
+        '<button class="admin-plus-btn secondary" id="admin-plus-tg-test" type="button" style="font-size:12px">发送测试消息</button>' +
+        '<button class="admin-plus-btn secondary" id="admin-plus-tg-webhook" type="button" style="font-size:12px">注册 Webhook</button>' +
+        '<button class="admin-plus-btn" id="admin-plus-tg-save" type="button">保存 TG 设置</button>' +
+      '</div>' +
+      '<div class="admin-plus-empty" style="padding:12px 16px;text-align:left;font-size:12px" id="admin-plus-tg-status"></div>' +
+      '</div>';
   }
 
   function field(name, label, value, type, options) {
@@ -7058,9 +8106,15 @@ function 生成安全管理后台注入代码() {
     const statusBadge = isOpen
       ? '<span class="admin-plus-badge" style="background:rgba(34,197,94,0.12);color:#bbf7d0;border-color:rgba(34,197,94,0.28)">已开放</span>'
       : '<span class="admin-plus-badge warn">已关闭</span>';
-    const scheduleText = cfg.scheduleEnabled
-      ? ('定时窗口：' + (cfg.startAt ? fmtTime(cfg.startAt) : '未设置') + ' 至 ' + (cfg.endAt ? fmtTime(cfg.endAt) : '未设置'))
-      : '未启用定时';
+    const scheduleText = (() => {
+      if (!cfg.scheduleEnabled) return '未启用定时';
+      let text = '定时开放：' + (cfg.startAt ? fmtTime(cfg.startAt) : '未设置');
+      if (cfg.startAt && cfg.endAt) {
+        const dur = Math.round((new Date(cfg.endAt) - new Date(cfg.startAt)) / 3600000 * 10) / 10;
+        text += ' \u2014 持续 ' + (dur <= 0 ? '??' : dur + ' 小时');
+      }
+      return text;
+    })();
     const pendingTable = pendingTasks.length > 0
       ? ['<div class="admin-plus-panel"><h3>待执行定时任务</h3>',
         renderTable(['任务ID', '操作类型', '执行时间', '状态', '操作'], pendingTasks.map(task => [
@@ -7083,42 +8137,30 @@ function 生成安全管理后台注入代码() {
       : '';
     return [
       '<div class="admin-plus-panel"><h3>注册权限总开关</h3>',
-      '<div style="display:flex;align-items:center;gap:16px;padding:16px;background:rgba(15,23,42,0.6);border-radius:12px;margin-bottom:16px">',
-        '<div style="font-size:18px;font-weight:600">当前注册状态</div>',
+      '<div class="admin-plus-reg-status-bar" style="display:flex;align-items:center;gap:14px;padding:14px 18px;background:var(--ap-card-status-bg,rgba(34,197,94,.1));border:1px solid var(--ap-card-status-border,rgba(34,197,94,.2));border-radius:8px;margin-bottom:16px">',
+        '<div style="font-size:24px;line-height:1">' + (isOpen ? '\u{1F513}' : '\u{1F512}') + '</div>',
+        '<div style="flex:1"><div style="font-size:14px;font-weight:600;color:var(--ap-text)">' + escapeHtml(status.message || (isOpen ? '注册功能已开放' : '注册功能已关闭')) + '</div><div style="font-size:12px;color:var(--ap-text-muted)">' + escapeHtml(scheduleText) + '</div></div>',
         statusBadge,
-        '<div style="color:var(--ap-text-muted);font-size:14px">' + escapeHtml(status.message || scheduleText) + '</div>',
       '</div>',
-      '<div style="display:flex;gap:12px;margin-bottom:16px">',
-        '<button class="admin-plus-btn" id="admin-plus-reg-toggle-on" style="background:' + (isOpen ? 'var(--ap-primary)' : 'rgba(34,197,94,0.8)') + '">' + (isOpen ? '重新开启注册' : '开启注册') + '</button>',
-        '<button class="admin-plus-btn warn" id="admin-plus-reg-toggle-off"' + (isOpen ? '' : ' disabled style="opacity:0.5"') + '>关闭注册</button>',
+      '<div style="display:flex;gap:10px">',
+        '<button class="admin-plus-btn admin-plus-reg-open-btn" id="admin-plus-reg-toggle-on" style="background:#10b981;border:none;color:#fff;font-weight:600;padding:10px 20px;font-size:14px;box-shadow:0 2px 8px rgba(16,185,129,.3)">' + (isOpen ? '\u{1F503}\u00A0 重新开启注册' : '\u{1F513}\u00A0 开启注册') + '</button>',
+        '<button class="admin-plus-btn warn" id="admin-plus-reg-toggle-off"' + (isOpen ? '' : ' disabled style="opacity:0.5;cursor:not-allowed"') + '>\u{1F6AB}\u00A0 关闭注册</button>',
       '</div>',
       '</div>',
       '<div class="admin-plus-panel"><h3>定时注册控制</h3>',
       '<div class="admin-plus-form">',
         field('reg-schedule-enabled', '启用定时注册', cfg.scheduleEnabled ? 'true' : 'false', 'select', [{label:'启用',value:'true'},{label:'关闭',value:'false'}]) +
-        field('reg-schedule-start', '定时开放开始时间', toDatetimeLocal(cfg.startAt), 'datetime-local') +
-        field('reg-schedule-end', '定时开放结束时间', toDatetimeLocal(cfg.endAt), 'datetime-local'),
+        field('reg-schedule-start', '开始时间', toDatetimeLocal(cfg.startAt), 'datetime-local') +
+        '<div class="admin-plus-field"><label>持续时长</label><select name="reg-schedule-duration">' +
+          [{v:'0.5',l:'30 分钟'},{v:'1',l:'1 小时'},{v:'2',l:'2 小时'},{v:'4',l:'4 小时'},{v:'8',l:'8 小时'},{v:'12',l:'12 小时'},{v:'24',l:'24 小时'}]
+            .map(o => '<option value="' + o.v + '">' + o.l + '</option>').join('') +
+        '</select></div>',
       '</div>',
       '<div class="admin-plus-actions" style="margin-top:16px">',
         '<button class="admin-plus-btn" id="admin-plus-reg-schedule-save">保存定时设置</button>',
       '</div>',
-      '</div>',
-      '<div class="admin-plus-panel"><h3>快速定时任务</h3>',
-      '<div class="admin-plus-form">',
-        field('quick-task-action', '选择操作', '', 'select', [{label:'开启注册',value:'enable'},{label:'关闭注册',value:'disable'},{label:'定时开启注册',value:'schedule_enable'},{label:'定时关闭注册',value:'schedule_disable'}]) +
-        field('quick-task-time', '执行时间', '', 'datetime-local'),
-        field('quick-task-start', '窗口开始时间 (定时开启用)', '', 'datetime-local') +
-        field('quick-task-end', '窗口结束时间 (定时开启用)', '', 'datetime-local'),
-      '</div>',
-      '<div class="admin-plus-actions" style="margin-top:16px">',
-        '<button class="admin-plus-btn" id="admin-plus-reg-quick-task">创建定时任务</button>',
-      '</div>',
-      '</div>',
       pendingTable,
       historyTable,
-      '<div class="admin-plus-panel"><h3>注册日志</h3>',
-      '<div id="admin-plus-reg-logs"></div>',
-      '</div>',
     ].join('');
   }
 
@@ -7131,15 +8173,17 @@ function 生成安全管理后台注入代码() {
   }
 
   function render() {
+    const viewEl = getViewEl(state.theme);
+    if (!viewEl) return;
     if (state.tab === 'overview') viewEl.innerHTML = renderOverview();
     if (state.tab === 'users') viewEl.innerHTML = renderUsers();
-    if (state.tab === 'events') viewEl.innerHTML = renderEvents();
     if (state.tab === 'config') viewEl.innerHTML = renderConfig();
     if (state.tab === 'registration') viewEl.innerHTML = renderRegistration();
     bindViewEvents();
   }
 
   function bindViewEvents() {
+    const viewEl = getViewEl(state.theme);
     const userSearch = document.getElementById('admin-plus-user-search');
     if (userSearch) userSearch.oninput = () => {
       state.userSearch = userSearch.value || '';
@@ -7266,7 +8310,6 @@ function 生成安全管理后台注入代码() {
       form.elements.register_enabled.value = defaultConfigPreset.register_enabled ? 'true' : 'false';
       form.elements.register_schedule_enabled.value = defaultConfigPreset.register_schedule_enabled ? 'true' : 'false';
       form.elements.register_start_at.value = defaultConfigPreset.register_start_at;
-      form.elements.register_end_at.value = defaultConfigPreset.register_end_at;
       setStatus('已填充推荐默认值，请点击应用');
     };
     if (saveBtn) saveBtn.onclick = async () => {
@@ -7294,7 +8337,11 @@ function 生成安全管理后台注入代码() {
             enabled: fd.get('register_enabled') === 'true',
             scheduleEnabled: fd.get('register_schedule_enabled') === 'true',
             startAt: fd.get('register_start_at') || null,
-            endAt: fd.get('register_end_at') || null
+            endAt: (() => {
+              const s = fd.get('register_start_at');
+              const d = parseFloat(fd.get('register_duration') || '0');
+              return (s && d > 0) ? new Date(new Date(s).getTime() + d * 3600000).toISOString().slice(0, 16) : null;
+            })()
           }
         };
         await api('/admin/system/config.json', { method: 'POST', body: JSON.stringify(nextConfig) });
@@ -7322,10 +8369,13 @@ function 生成安全管理后台注入代码() {
     const regScheduleSave = document.getElementById('admin-plus-reg-schedule-save');
     if (regScheduleSave) regScheduleSave.onclick = async () => {
       try {
-        const form = document.getElementById('admin-plus-config-form');
         const scheduleEnabled = document.querySelector('[name="reg-schedule-enabled"]')?.value === 'true';
         const startAt = document.querySelector('[name="reg-schedule-start"]')?.value || null;
-        const endAt = document.querySelector('[name="reg-schedule-end"]')?.value || null;
+        const durationHours = parseFloat(document.querySelector('[name="reg-schedule-duration"]')?.value || '1');
+        let endAt = null;
+        if (startAt && durationHours > 0) {
+          endAt = new Date(new Date(startAt).getTime() + durationHours * 3600000).toISOString().slice(0, 16);
+        }
         await api('/admin/system/registration/schedule', {
           method: 'POST',
           body: JSON.stringify({ scheduleEnabled, startAt, endAt })
@@ -7333,22 +8383,6 @@ function 生成安全管理后台注入代码() {
         setStatus('定时注册设置已更新');
         await loadTab('registration', true);
       } catch (error) { setStatus('保存失败: ' + error.message); }
-    };
-    const regQuickTask = document.getElementById('admin-plus-reg-quick-task');
-    if (regQuickTask) regQuickTask.onclick = async () => {
-      try {
-        const action = document.querySelector('[name="quick-task-action"]')?.value;
-        const executeAt = document.querySelector('[name="quick-task-time"]')?.value;
-        const startAt = document.querySelector('[name="quick-task-start"]')?.value || null;
-        const endAt = document.querySelector('[name="quick-task-end"]')?.value || null;
-        if (!action || !executeAt) { setStatus('请填写完整的任务信息'); return; }
-        await api('/admin/system/registration/tasks', {
-          method: 'POST',
-          body: JSON.stringify({ action, executeAt, startAt, endAt })
-        });
-        setStatus('定时任务已创建');
-        await loadTab('registration', true);
-      } catch (error) { setStatus('任务创建失败: ' + error.message); }
     };
     viewEl.querySelectorAll('[data-cancel-task]').forEach((button) => button.onclick = async () => {
       const taskId = button.getAttribute('data-cancel-task');
@@ -7360,11 +8394,107 @@ function 生成安全管理后台注入代码() {
         await loadTab('registration', true);
       } catch (error) { setStatus('取消失败: ' + error.message); }
     });
+    const tgSaveBtn = document.getElementById('admin-plus-tg-save');
+    const tgTestBtn = document.getElementById('admin-plus-tg-test');
+    const tgWebhookBtn = document.getElementById('admin-plus-tg-webhook');
+    const tgStatusEl = document.getElementById('admin-plus-tg-status');
+    if (tgSaveBtn) tgSaveBtn.onclick = async () => {
+      try {
+        const botToken = document.querySelector('[name="tg_bot_token"]')?.value?.trim() || '';
+        const chatId = document.querySelector('[name="tg_chat_id"]')?.value?.trim() || '';
+        const panelId = document.querySelector('[name="tg_panel"]')?.value || 'A';
+        const notifyEnabled = document.querySelector('[name="tg_security_notify"]')?.value === 'true';
+        const body = { BotToken: botToken, ChatID: chatId, PanelID: panelId, securityNotifyEnabled: notifyEnabled };
+        await api('/admin/system/tg-config', { method: 'POST', body: JSON.stringify(body) });
+        state.tgState = { botToken: botToken, chatId: chatId, panelId: panelId, securityNotifyEnabled: notifyEnabled };
+        if (tgStatusEl) tgStatusEl.innerHTML = 'TG 设置已保存';
+        setStatus('TG 设置已保存');
+      } catch (error) {
+        if (tgStatusEl) tgStatusEl.innerHTML = '保存失败: ' + escapeHtml(error.message);
+        setStatus('TG 保存失败: ' + error.message);
+      }
+    };
+    if (tgTestBtn) tgTestBtn.onclick = async () => {
+      try {
+        const botToken = document.querySelector('[name="tg_bot_token"]')?.value?.trim() || '';
+        const chatId = document.querySelector('[name="tg_chat_id"]')?.value?.trim() || '';
+        if (!botToken || !chatId) { if (tgStatusEl) tgStatusEl.innerHTML = '请先填写 Bot Token 和 Chat ID'; return; }
+        const testMsg = '<b>🧪 测试消息</b>\\n\\nTG Bot 安全管理通知配置成功！\\n\\n发送 <b>/bchelp</b> 查看可用命令。';
+        const resp = await fetch('https://api.telegram.org/bot' + botToken + '/sendMessage?' + new URLSearchParams({ chat_id: chatId, parse_mode: 'HTML', text: testMsg }).toString());
+        const result = await resp.json();
+        if (result.ok) {
+          if (tgStatusEl) tgStatusEl.innerHTML = '测试消息发送成功！请检查 TG 群组。';
+          setStatus('TG 测试消息已发送');
+        } else {
+          if (tgStatusEl) tgStatusEl.innerHTML = '发送失败: ' + escapeHtml(result.description || '未知错误');
+        }
+      } catch (error) {
+        if (tgStatusEl) tgStatusEl.innerHTML = '测试失败: ' + escapeHtml(error.message);
+      }
+    };
+    if (tgWebhookBtn) tgWebhookBtn.onclick = async () => {
+      try {
+        const botToken = document.querySelector('[name="tg_bot_token"]')?.value?.trim() || '';
+        if (!botToken) { if (tgStatusEl) tgStatusEl.innerHTML = '请先填写 Bot Token'; return; }
+        const webhookUrl = window.location.origin + '/tg-webhook';
+        const resp = await fetch('https://api.telegram.org/bot' + botToken + '/setWebhook?url=' + encodeURIComponent(webhookUrl));
+        const result = await resp.json();
+        const curPanelId = document.querySelector('[name="tg_panel"]')?.value || 'A';
+        const isB = curPanelId === 'B';
+        const cmds = { commands: [
+          { command: isB ? 'bchelp2' : 'bchelp', description: '显示可用命令' },
+          { command: isB ? 'bcbanned2' : 'bcbanned', description: '列出被封禁用户' },
+          { command: isB ? 'bcbaninfo2' : 'bcbaninfo', description: '查封禁详情' },
+          { command: isB ? 'bcunban2' : 'bcunban', description: '解封用户' }
+        ]};
+        const cmdResp = await fetch('https://api.telegram.org/bot' + botToken + '/setMyCommands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cmds) });
+        await fetch('https://api.telegram.org/bot' + botToken + '/deleteMyCommands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: { type: 'all_group_chats' } }) });
+        const cmdResult = await cmdResp.json();
+        const parts = [];
+        if (!result.ok) parts.push('Webhook: ' + (result.description || '失败'));
+        if (!cmdResult.ok) parts.push('命令: ' + (cmdResult.description || '失败'));
+        if (!parts.length) {
+          if (tgStatusEl) tgStatusEl.innerHTML = 'Webhook + 命令已注册 ✓';
+          setStatus('TG 就绪');
+        } else {
+          if (tgStatusEl) tgStatusEl.innerHTML = parts.join(' | ');
+        }
+      } catch (error) {
+        if (tgStatusEl) tgStatusEl.innerHTML = 'Webhook 注册失败: ' + escapeHtml(error.message);
+      }
+    };
+  }
+  loadTab('overview', false);
+  } catch(e) {
+    var el = document.querySelector('.admin-plus-layout');
+    if (el) el.innerHTML = '<div class="admin-plus-panel"><div class="admin-plus-empty" style="color:#ef4444;font-weight:600">Security module init error: ' + (e && e.message ? e.message : 'Unknown') + '</div></div>';
+    console.error('Security module init failed:', e);
   }
 })();
 </script>
 `;
 }
+
+function 生成安全模块独立页面() {
+	const 面板代码 = 生成安全管理后台注入代码();
+	return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>安全管理控制台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>body{margin:0;padding:0;font-family:'Inter',system-ui,-apple-system,sans-serif}</style>
+</head>
+<body>
+<div id="admin-plus-navbar" style="padding:10px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ap-body-border,#333);transition:margin-left .15s"><a href="/admin" style="display:inline-flex;align-items:center;gap:6px;color:var(--ap-body-muted,#888);text-decoration:none;font-size:12px;font-family:Inter,system-ui,sans-serif"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:14px;height:14px"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /></svg> 返回后台</a><span style="font-size:13px;font-weight:700;letter-spacing:-.01em;color:var(--ap-body-text,#fff)">Security Console</span><span></span></div>
+${面板代码}
+</body>
+</html>`;
+}
+
 export const __adminPlus = {
 	内存缓存清除,
 	获取默认安全配置,
