@@ -120,7 +120,7 @@ class StateStore {
 	}
 }
 let SOCKS5白名单 = ['*tapecontent.net', '*cloudatacdn.com', '*loadshare.org', '*cdn-centaurus.com', 'scholar.google.com'];
-const Pages静态页面 = 'https://edt-pages.github.io';
+const Pages静态页面 = 'https://shuaidaoya.github.io/Beacon-Pages.github.io';
 const 安全配置缓存键 = 'sys.config.json';
 const 安全事件前缀 = 'sys:event:';
 const 安全用户前缀 = 'sys:user:';
@@ -380,6 +380,7 @@ export default {
 			return await 处理XHTTP请求(request, { 默认UUID: 当前节点UUID, 运行时: 安全运行时 });
 		} else {
 			if (url.protocol === 'http:') return Response.redirect(url.href.replace(`http://${url.hostname}`, `https://${url.hostname}`), 301);
+			if (访问路径 === '' && 管理员密码 && env.KV && typeof env.KV.get === 'function') return fetch(Pages静态页面 + '/register' + url.search);
 			if (!管理员密码) return fetch(Pages静态页面 + '/noADMIN').then(r => { const headers = new Headers(r.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(r.body, { status: 404, statusText: r.statusText, headers }) });
 			if (env.KV && typeof env.KV.get === 'function') {
 				const 区分大小写访问路径 = url.pathname.slice(1);
@@ -404,11 +405,11 @@ export default {
 						}
 					}
 					return fetch(Pages静态页面 + '/login');
- 				} else if (访问路径 === 'admin/security') {// 安全模块独立页面
+ 				} else if (访问路径 === 'admin/security' || 访问路径.startsWith('admin/security/')) {
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
 					if (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码)) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
-					return new Response(生成安全模块独立页面(), { status: 200, headers: { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-store' } });
+					return fetch(Pages静态页面 + '/admin/security' + url.search);
 				} else if (访问路径 === 'admin' || 访问路径.startsWith('admin/')) {//验证cookie后响应管理页面
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
