@@ -481,6 +481,7 @@ export default {
 					account: 校验结果.account,
 					email: 校验结果.email,
 					user,
+					checkin: 安全构建签到信息(user, 安全当前时间(env)),
 					node: await 安全构建节点订阅信息(url, user),
 				}, 200);
 			} catch (error) {
@@ -492,36 +493,61 @@ export default {
 			try {
 				if (request.method !== 'GET') return 认证JSON响应('AUTH_METHOD_NOT_ALLOWED', '请求方式不支持', null, 405);
 				const 运行时 = await 创建安全运行时(env);
-				if (!运行时) return 认证JSON响应('AUTH_STORAGE_UNAVAILABLE', '用户存储未就绪，请先绑定 KV。', null, 503);
-				const uuid = String(url.searchParams.get('uuid') || '').toLowerCase();
-				const token = String(url.searchParams.get('token') || '').trim();
-				if (!安全UUID有效(uuid) || !token) {
-					return 认证JSON响应('AUTH_VALIDATION_ERROR', '请提供有效的 UUID 和 Token。', null, 400);
-				}
-				const user = await 安全获取用户(运行时, uuid);
-				if (!user) {
-					return 认证JSON响应('AUTH_USER_NOT_FOUND', '未找到对应用户，请重新登录。', null, 404);
-				}
-				const expectedToken = await 安全获取订阅访问令牌(url, user);
-				if (token !== expectedToken) {
-					return 认证JSON响应('AUTH_INVALID_TOKEN', '用户凭证已失效，请重新登录。', null, 403);
-				}
-				if (安全用户已封禁(user)) {
-					return 认证JSON响应('AUTH_USER_BANNED', '当前账号已被封禁，请联系管理员解封。', {
-						user: { uuid: user.uuid },
+				const 校验结果 = await 安全校验用户令牌请求(运行时, url, url.searchParams.get('uuid'), url.searchParams.get('token'));
+				if (!校验结果.ok) {
+					return 认证JSON响应(校验结果.code, 校验结果.message, 校验结果.user ? {
+						user: { uuid: 校验结果.user.uuid },
 						status: 'banned',
-					}, 403);
+					} : null, 校验结果.status);
 				}
+				const user = 校验结果.user;
 				const profile = 安全提取用户展示信息(user);
 				return 认证JSON响应('AUTH_USER_INFO_SUCCESS', '获取成功。', {
 					account: profile.account || user.label || '',
 					email: profile.email || '',
 					user,
+					checkin: 安全构建签到信息(user, 安全当前时间(env)),
 					node: await 安全构建节点订阅信息(url, user),
 				}, 200);
 			} catch (error) {
 				console.error('[用户信息] 接口处理失败:', error?.stack || error?.message || String(error));
 				return 认证JSON响应('AUTH_USER_INFO_FAILED', `获取用户信息失败：${error?.message || '服务器内部异常'}`, null, 500);
+			}
+		}
+		if (访问路径 === 'register/checkin' || 访问路径 === 'register/checkin/') {
+			try {
+				if (request.method !== 'POST') return 认证JSON响应('AUTH_METHOD_NOT_ALLOWED', '请求方式不支持', null, 405);
+				const 运行时 = await 创建安全运行时(env);
+				const 校验结果 = await 安全校验用户令牌请求(运行时, url, url.searchParams.get('uuid'), url.searchParams.get('token'));
+				if (!校验结果.ok) {
+					return 认证JSON响应(校验结果.code, 校验结果.message, 校验结果.user ? {
+						user: { uuid: 校验结果.user.uuid },
+						status: 'banned',
+						checkin: 安全构建签到信息(校验结果.user, 安全当前时间(env)),
+					} : null, 校验结果.status);
+				}
+				const nowMs = 安全当前时间(env);
+				const 签到结果 = await 安全执行每日签到(运行时, 校验结果.user, { ip: 访问IP, source: 'user-dashboard' }, nowMs);
+				if (!签到结果.ok) {
+					return 认证JSON响应(签到结果.code, 签到结果.message, {
+						user: 签到结果.user,
+						checkin: 签到结果.checkin,
+						node: 签到结果.user ? await 安全构建节点订阅信息(url, 签到结果.user) : null,
+					}, 签到结果.status);
+				}
+				const profile = 安全提取用户展示信息(签到结果.user);
+				return 认证JSON响应('CHECKIN_SUCCESS', 签到结果.message, {
+					account: profile.account || 签到结果.user.label || '',
+					email: profile.email || '',
+					user: 签到结果.user,
+					checkin: 签到结果.checkin,
+					rewardGB: 签到结果.rewardGB,
+					rewardBytes: 签到结果.rewardBytes,
+					node: await 安全构建节点订阅信息(url, 签到结果.user),
+				}, 200);
+			} catch (error) {
+				console.error('[用户签到] 接口处理失败:', error?.stack || error?.message || String(error));
+				return 认证JSON响应('CHECKIN_FAILED', `签到失败：${error?.message || '服务器内部异常'}`, null, 500);
 			}
 		}
 		if (访问路径 === 'register/config' && request.method === 'GET') {
@@ -4472,6 +4498,43 @@ function 安全当前时间(env = {}) {
 	return Math.max(0, 安全数值(env.SECURITY_NOW_MS, Date.now(), 0));
 }
 
+function 安全获取签到日期键(nowMs = Date.now()) {
+	const shifted = new Date(nowMs + 8 * 3600 * 1000);
+	const year = shifted.getUTCFullYear();
+	const month = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+	const day = String(shifted.getUTCDate()).padStart(2, '0');
+	return `${year}-${month}-${day}`;
+}
+
+function 安全获取签到重置时间(nowMs = Date.now()) {
+	const shifted = new Date(nowMs + 8 * 3600 * 1000);
+	return Date.UTC(
+		shifted.getUTCFullYear(),
+		shifted.getUTCMonth(),
+		shifted.getUTCDate() + 1,
+		0, 0, 0, 0,
+	) - 8 * 3600 * 1000;
+}
+
+function 安全构建签到信息(user = {}, nowMs = Date.now()) {
+	const attributes = user && typeof user.attributes === 'object' && user.attributes ? user.attributes : {};
+	const dailyCheckin = attributes.dailyCheckin && typeof attributes.dailyCheckin === 'object' ? attributes.dailyCheckin : {};
+	const todayKey = 安全获取签到日期键(nowMs);
+	return {
+		enabled: true,
+		minRewardGB: 2,
+		maxRewardGB: 20,
+		todayKey,
+		claimedToday: dailyCheckin.lastDateKey === todayKey,
+		lastDateKey: dailyCheckin.lastDateKey || '',
+		claimedAt: 安全时间戳(dailyCheckin.claimedAt, 0) || 0,
+		rewardGB: Math.max(0, 安全数值(dailyCheckin.rewardGB, 0, 0)),
+		rewardBytes: Math.max(0, 安全数值(dailyCheckin.rewardBytes, 0, 0)),
+		totalClaimDays: Math.max(0, 安全数值(dailyCheckin.totalClaimDays, 0, 0)),
+		nextAt: 安全获取签到重置时间(nowMs),
+	};
+}
+
 function 安全格式化本地时间(value) {
 	const timestamp = 安全时间戳(value, null);
 	if (!timestamp) return '-';
@@ -4899,6 +4962,20 @@ async function 安全KV写入JSON(env, key, value, expirationTtl) {
 	await DO设置(env, key, value);
 }
 
+async function 安全KV删除键(env, key) {
+	if (!env || !key) return;
+	if (DB实例 && key.startsWith(安全用户前缀)) {
+		const uuid = key.slice(安全用户前缀.length);
+		if (安全UUID有效(uuid)) {
+			try { await DB实例.prepare('DELETE FROM users WHERE uuid=?').bind(uuid).run(); } catch (e) { /* ignore */ }
+		}
+	}
+	try { await env.KV.delete(key); } catch (e) { /* ignore */ }
+	内存缓存.delete('kv:' + key);
+	if (key.startsWith(安全用户前缀)) 内存缓存清除用户列表();
+	await DO删除(env, key);
+}
+
 function 安全标准化订阅状态(uuid, raw = {}, nowMs = Date.now()) {
 	const currentHourStart = 安全窗口起始时间(nowMs, 'hour');
 	const currentDayStart = 安全窗口起始时间(nowMs, 'day');
@@ -5296,7 +5373,7 @@ async function 安全确保用户存在(运行时, uuid, 元数据 = {}) {
 		subscriptionToken: 安全生成订阅访问令牌(),
 		subscriptionTokenUpdatedAt: nowMs,
 		subscriptionState: 'active',
-		traffic: 10 * 1024 * 1024 * 1024, // 默认 10GB
+		traffic: 30 * 1024 * 1024 * 1024, // 默认 30GB
 		used_traffic: 0,
 		bannedAt: null,
 		bannedReason: null,
@@ -5370,6 +5447,109 @@ async function 安全根据注册信息获取用户(运行时, payload = {}) {
 async function 安全获取用户(运行时, uuid) {
 	if (!运行时 || !安全UUID有效(uuid)) return null;
 	return await 安全KV读取JSON(运行时.env, `${安全用户前缀}${String(uuid).toLowerCase()}`, null);
+}
+
+async function 安全校验用户令牌请求(运行时, url, uuid, token) {
+	if (!运行时) return { ok: false, code: 'AUTH_STORAGE_UNAVAILABLE', message: '用户存储未就绪，请先绑定 KV。', status: 503 };
+	const normalizedUUID = String(uuid || '').toLowerCase();
+	const normalizedToken = String(token || '').trim();
+	if (!安全UUID有效(normalizedUUID) || !normalizedToken) {
+		return { ok: false, code: 'AUTH_VALIDATION_ERROR', message: '请提供有效的 UUID 和 Token。', status: 400 };
+	}
+	const user = await 安全获取用户(运行时, normalizedUUID);
+	if (!user) {
+		return { ok: false, code: 'AUTH_USER_NOT_FOUND', message: '未找到对应用户，请重新登录。', status: 404 };
+	}
+	const expectedToken = await 安全获取订阅访问令牌(url, user);
+	if (normalizedToken !== expectedToken) {
+		return { ok: false, code: 'AUTH_INVALID_TOKEN', message: '用户凭证已失效，请重新登录。', status: 403 };
+	}
+	if (安全用户已封禁(user)) {
+		return { ok: false, code: 'AUTH_USER_BANNED', message: '当前账号已被封禁，请联系管理员解封。', status: 403, user };
+	}
+	return { ok: true, user };
+}
+
+async function 安全执行每日签到(运行时, user, meta = {}, nowMs = Date.now()) {
+	if (!运行时 || !user || !安全UUID有效(user.uuid)) {
+		return { ok: false, code: 'AUTH_USER_NOT_FOUND', message: '用户不存在。', status: 404 };
+	}
+	const 当前签到信息 = 安全构建签到信息(user, nowMs);
+	if (当前签到信息.claimedToday) {
+		return { ok: false, code: 'CHECKIN_ALREADY_CLAIMED', message: '今天已经签到过了，明天再来领取吧。', status: 409, user, checkin: 当前签到信息 };
+	}
+	const rewardGB = 2 + Math.floor(Math.random() * 19);
+	const rewardBytes = rewardGB * 1024 * 1024 * 1024;
+	const attributes = user.attributes && typeof user.attributes === 'object' ? { ...user.attributes } : {};
+	const dailyCheckin = attributes.dailyCheckin && typeof attributes.dailyCheckin === 'object' ? { ...attributes.dailyCheckin } : {};
+	dailyCheckin.lastDateKey = 当前签到信息.todayKey;
+	dailyCheckin.claimedAt = nowMs;
+	dailyCheckin.rewardGB = rewardGB;
+	dailyCheckin.rewardBytes = rewardBytes;
+	dailyCheckin.totalClaimDays = Math.max(0, 安全数值(dailyCheckin.totalClaimDays, 0, 0)) + 1;
+	attributes.dailyCheckin = dailyCheckin;
+	user.attributes = attributes;
+	user.traffic = Math.max(0, 安全数值(user.traffic, 0, 0)) + rewardBytes;
+	user.updatedAt = nowMs;
+	user.lastSeenAt = nowMs;
+	const saved = await 安全保存用户记录(运行时, user, nowMs);
+	await 安全记录事件(运行时, {
+		eventType: 'user.checkin.claimed',
+		subjectType: 'uuid',
+		subjectId: saved.uuid,
+		ip: meta.ip || null,
+		payload: {
+			rewardGB,
+			rewardBytes,
+			totalClaimDays: dailyCheckin.totalClaimDays,
+			source: meta.source || 'user-dashboard',
+		},
+		createdAt: nowMs,
+	});
+	return {
+		ok: true,
+		status: 200,
+		message: `签到成功，已领取 ${rewardGB} GB 流量。`,
+		user: saved,
+		rewardGB,
+		rewardBytes,
+		checkin: 安全构建签到信息(saved, nowMs),
+	};
+}
+
+async function 安全删除用户账号(运行时, uuid, meta = {}, nowMs = Date.now()) {
+	if (!运行时 || !安全UUID有效(uuid)) return null;
+	const normalizedUuid = String(uuid).toLowerCase();
+	const user = await 安全获取用户(运行时, normalizedUuid);
+	if (!user) return null;
+	const userKey = typeof user.userKey === 'string' ? user.userKey : '';
+	const deletedSummary = {
+		uuid: normalizedUuid,
+		userKey: userKey || null,
+		label: user.label || null,
+		status: 'deleted',
+		profile: 安全提取用户展示信息(user),
+		lastIp: user.lastIp || null,
+	};
+	await 安全KV删除键(运行时.env, 安全用户前缀 + normalizedUuid);
+	if (userKey) await 安全KV删除键(运行时.env, 安全用户索引键(userKey));
+	await 安全KV删除键(运行时.env, 安全用户木马索引键(sha224(normalizedUuid)));
+	await 安全KV删除键(运行时.env, 安全订阅状态键(normalizedUuid));
+	await 安全KV删除键(运行时.env, 安全活跃封禁键('uuid', normalizedUuid));
+	await 安全记录事件(运行时, {
+		eventType: 'user.deleted',
+		subjectType: 'uuid',
+		subjectId: normalizedUuid,
+		ip: meta.ip || null,
+		payload: {
+			label: user.label || null,
+			userKey: userKey || null,
+			source: meta.source || 'admin-panel',
+			reason: meta.reason || 'admin-deleted',
+		},
+		createdAt: nowMs,
+	});
+	return deletedSummary;
 }
 
 async function 安全是否允许节点UUID(运行时, 默认UUID, candidateUUID) {
@@ -6300,11 +6480,23 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 		return 安全JSON响应({ success: true, user });
 	}
 
+	if (pathname === '/admin/system/users/delete' && request.method === 'POST') {
+		const payload = await request.json().catch(() => ({}));
+		if (!安全UUID有效(payload.uuid)) return 安全JSON响应({ success: false, error: 'uuid 不能为空且必须合法' }, 400);
+		const user = await 安全执行用户管理动作(运行时, url, 'delete', payload.uuid, {
+			ip: 访问IP,
+			reason: payload.reason || 'admin-deleted',
+			source: 'admin-api',
+		}, nowMs);
+		if (!user) return 安全JSON响应({ success: false, error: '未找到对应用户' }, 404);
+		return 安全JSON响应({ success: true, user });
+	}
+
 	if (pathname === '/admin/system/users/batch' && request.method === 'POST') {
 		const payload = await request.json().catch(() => ({}));
 		const action = String(payload.action || '').trim();
 		const uuids = Array.isArray(payload.uuids) ? payload.uuids : [];
-		if (!['ban', 'disable', 'restore', 'reset-subscription'].includes(action)) return 安全JSON响应({ success: false, error: 'action 不支持' }, 400);
+		if (!['ban', 'disable', 'restore', 'reset-subscription', 'delete'].includes(action)) return 安全JSON响应({ success: false, error: 'action 不支持' }, 400);
 		if (!uuids.length) return 安全JSON响应({ success: false, error: 'uuids 不能为空' }, 400);
 		const result = await 安全批量执行用户管理动作(运行时, url, action, uuids, {
 			ip: 访问IP,
@@ -6467,6 +6659,7 @@ function 安全是否用户管理事件(eventType = '') {
 		'user.registered',
 		'user.banned',
 		'user.restored',
+		'user.deleted',
 		'user.subscription.reset',
 		'user.batch.completed',
 	].includes(String(eventType || ''));
@@ -6491,12 +6684,17 @@ async function 安全执行用户管理动作(运行时, url, action, uuid, meta
 		user = await 安全设置用户订阅状态(运行时, normalizedUuid, false, meta, nowMs);
 	} else if (action === 'restore') {
 		user = await 安全设置用户订阅状态(运行时, normalizedUuid, true, meta, nowMs);
+	} else if (action === 'delete') {
+		user = await 安全删除用户账号(运行时, normalizedUuid, meta, nowMs);
 	} else if (action === 'reset-subscription') {
 		user = await 安全重置用户订阅令牌(运行时, normalizedUuid, meta, nowMs);
 	} else {
 		return null;
 	}
-	return user ? await 安全构建用户管理信息(运行时, url, user, nowMs) : null;
+	if (!user) return null;
+	return action === 'delete'
+		? user
+		: await 安全构建用户管理信息(运行时, url, user, nowMs);
 }
 
 async function 安全批量执行用户管理动作(运行时, url, action, uuids = [], meta = {}, nowMs = Date.now()) {
@@ -8275,7 +8473,7 @@ function 生成安全管理后台注入代码() {
         card('正常用户', summary.active != null ? summary.active : '-') +
         card('封禁用户', summary.banned != null ? summary.banned : '-') +
       '</div>',
-      '<div class="admin-plus-panel"><div class="admin-plus-panel-header-wrap"><div><h3>用户列表</h3><div class="admin-plus-desc">支持按用户名、邮箱、UUID、IP 搜索，并执行批量封禁、解封和重置订阅。</div></div><div class="admin-plus-toolbar"><input id="admin-plus-user-search" class="admin-plus-inline-input" placeholder="搜索 用户名 / 邮箱 / UUID / IP" value="' + escapeHtml(state.userSearch || '') + '" /><select id="admin-plus-user-status-filter" class="admin-plus-inline-input" style="min-width:160px"><option value="all"' + (state.userStatusFilter === 'all' ? ' selected' : '') + '>全部状态</option><option value="active"' + (state.userStatusFilter === 'active' ? ' selected' : '') + '>正常</option><option value="banned"' + (state.userStatusFilter === 'banned' ? ' selected' : '') + '>已封禁</option></select><button class="admin-plus-btn secondary" type="button" id="admin-plus-select-filtered">全选当前筛选</button><button class="admin-plus-btn secondary" type="button" id="admin-plus-clear-selection">清空选择</button><a class="admin-plus-btn secondary" href="/register" target="_blank" rel="noreferrer">打开用户面板</a></div></div><div class="admin-plus-empty" style="padding:16px 20px;align-items:flex-start;text-align:left">已选择 ' + escapeHtml(selectedCount) + ' 个用户，可直接执行批量动作。<div class="admin-plus-actions"><button class="admin-plus-btn warn" type="button" data-batch-action="ban">批量封禁</button><button class="admin-plus-btn" type="button" data-batch-action="restore">批量解封</button><button class="admin-plus-btn secondary" type="button" data-batch-action="reset-subscription">批量重置订阅</button></div></div>',
+      '<div class="admin-plus-panel"><div class="admin-plus-panel-header-wrap"><div><h3>用户列表</h3><div class="admin-plus-desc">支持按用户名、邮箱、UUID、IP 搜索，并执行批量封禁、解封、重置订阅和删除用户。</div></div><div class="admin-plus-toolbar"><input id="admin-plus-user-search" class="admin-plus-inline-input" placeholder="搜索 用户名 / 邮箱 / UUID / IP" value="' + escapeHtml(state.userSearch || '') + '" /><select id="admin-plus-user-status-filter" class="admin-plus-inline-input" style="min-width:160px"><option value="all"' + (state.userStatusFilter === 'all' ? ' selected' : '') + '>全部状态</option><option value="active"' + (state.userStatusFilter === 'active' ? ' selected' : '') + '>正常</option><option value="banned"' + (state.userStatusFilter === 'banned' ? ' selected' : '') + '>已封禁</option></select><button class="admin-plus-btn secondary" type="button" id="admin-plus-select-filtered">全选当前筛选</button><button class="admin-plus-btn secondary" type="button" id="admin-plus-clear-selection">清空选择</button><a class="admin-plus-btn secondary" href="/register" target="_blank" rel="noreferrer">打开用户面板</a></div></div><div class="admin-plus-empty" style="padding:16px 20px;align-items:flex-start;text-align:left">已选择 ' + escapeHtml(selectedCount) + ' 个用户，可直接执行批量动作。<div class="admin-plus-actions"><button class="admin-plus-btn warn" type="button" data-batch-action="ban">批量封禁</button><button class="admin-plus-btn" type="button" data-batch-action="restore">批量解封</button><button class="admin-plus-btn secondary" type="button" data-batch-action="reset-subscription">批量重置订阅</button><button class="admin-plus-btn warn" type="button" data-batch-action="delete">批量删除</button></div></div>',
       renderTable(['选择', '用户名', '邮箱', 'UUID', '状态', '最近活跃', '操作'], filteredUsers.map(item => [
         '<input type="checkbox" data-user-toggle="' + escapeHtml(item.uuid) + '"' + (selectedSet.has(item.uuid) ? ' checked' : '') + ' />',
         escapeHtml(item.profile && item.profile.account || item.label || '-'),
@@ -8291,6 +8489,7 @@ function 生成安全管理后台注入代码() {
             ? '<button class="admin-plus-btn tiny" data-user-action="restore" data-user-uuid="' + escapeHtml(item.uuid) + '">解封</button>'
             : '<button class="admin-plus-btn warn tiny" data-user-action="ban" data-user-uuid="' + escapeHtml(item.uuid) + '">封禁</button>') +
           '<button class="admin-plus-btn secondary tiny" data-user-action="reset-subscription" data-user-uuid="' + escapeHtml(item.uuid) + '">重置订阅</button>' +
+          '<button class="admin-plus-btn warn tiny" data-user-action="delete" data-user-uuid="' + escapeHtml(item.uuid) + '">删除</button>' +
         '</div>'
       ])),
       '</div>'
@@ -8304,6 +8503,7 @@ function 生成安全管理后台注入代码() {
             ? '<button class="admin-plus-btn tiny" data-user-action="restore" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">解封用户</button>'
             : '<button class="admin-plus-btn warn tiny" data-user-action="ban" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">封禁用户</button>') +
           '<button class="admin-plus-btn secondary tiny" data-user-action="reset-subscription" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">轮换订阅令牌</button>' +
+          '<button class="admin-plus-btn warn tiny" data-user-action="delete" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">删除用户</button>' +
         '</div></div><div class="admin-plus-detail-grid">' +
           detail('用户名', selectedUser.profile && selectedUser.profile.account || '-') +
           detail('邮箱', selectedUser.profile && selectedUser.profile.email || '-') +
@@ -8553,9 +8753,11 @@ function 生成安全管理后台注入代码() {
         setStatus('请先勾选需要处理的用户');
         return;
       }
-      const actionLabel = action === 'ban' || action === 'disable' ? '封禁' : action === 'restore' ? '解封' : '重置订阅';
+      const actionLabel = action === 'ban' || action === 'disable' ? '封禁' : action === 'restore' ? '解封' : action === 'delete' ? '删除' : '重置订阅';
       const confirmText = action === 'ban' || action === 'disable'
         ? ('确认批量封禁这 ' + uuids.length + ' 个用户吗？封禁后，这些账号将无法登录和订阅，只有管理员解封后才会恢复。')
+        : action === 'delete'
+          ? ('确认彻底删除这 ' + uuids.length + ' 个用户吗？此操作不可恢复，用户记录和订阅信息会被一并清理。')
         : ('确认批量' + actionLabel + '这 ' + uuids.length + ' 个用户吗？');
       if (!window.confirm(confirmText)) return;
       try {
@@ -8579,21 +8781,31 @@ function 生成安全管理后台注入代码() {
         ? '/admin/system/users/ban'
         : action === 'restore'
           ? '/admin/system/users/restore'
-          : '/admin/system/users/reset-subscription';
+          : action === 'delete'
+            ? '/admin/system/users/delete'
+            : '/admin/system/users/reset-subscription';
       const successText = action === 'ban' || action === 'disable'
         ? '用户已封禁'
         : action === 'restore'
           ? '用户已解封'
-          : '订阅令牌已重置，旧订阅地址已失效';
+          : action === 'delete'
+            ? '用户已删除'
+            : '订阅令牌已重置，旧订阅地址已失效';
       if ((action === 'ban' || action === 'disable') && !window.confirm('确认封禁该用户吗？封禁后，该账号将无法登录和订阅，只有管理员解封后才会恢复。')) return;
+      if (action === 'delete' && !window.confirm('确认彻底删除该用户吗？此操作不可恢复，用户记录和订阅信息会被一并清理。')) return;
       try {
         await api(endpoint, {
           method: 'POST',
           body: JSON.stringify({ uuid, reason: 'admin-ui' })
         });
         setStatus(successText);
-        state.selectedUserUuid = uuid;
-        if (!state.selectedUserUuids.includes(uuid)) state.selectedUserUuids = [...state.selectedUserUuids, uuid];
+        if (action === 'delete') {
+          state.selectedUserUuid = null;
+          state.selectedUserUuids = (state.selectedUserUuids || []).filter(item => item !== uuid);
+        } else {
+          state.selectedUserUuid = uuid;
+          if (!state.selectedUserUuids.includes(uuid)) state.selectedUserUuids = [...state.selectedUserUuids, uuid];
+        }
         await loadTab('users', true);
       } catch (error) {
         setStatus('用户操作失败: ' + error.message);
