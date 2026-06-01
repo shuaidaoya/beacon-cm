@@ -860,6 +860,25 @@ export default {
 								target: 订阅类型,
 							}, 当前时间戳));
 						}
+						// 流量统计：订阅内容字节计入用户流量
+						const 流量用户 = 请求订阅用户 || 订阅用户;
+						if (流量用户?.uuid && 订阅内容) {
+							const 字节数 = new TextEncoder().encode(订阅内容).length;
+							ctx.waitUntil((async () => {
+								if (DB实例) {
+									try { await DB实例.prepare('UPDATE users SET used_traffic=used_traffic+? WHERE uuid=?').bind(字节数, 流量用户.uuid).run(); } catch(e) {}
+								}
+								try {
+									const key = 安全用户前缀 + 流量用户.uuid;
+									const text = await env.KV.get(key);
+									if (text) {
+										const u = JSON.parse(text);
+										u.used_traffic = (u.used_traffic || 0) + 字节数;
+										await env.KV.put(key, JSON.stringify(u));
+									}
+								} catch(e) {}
+							})());
+						}
 						return new Response(订阅内容, { status: 200, headers: responseHeaders });
 					}
 					if (请求订阅用户 && 订阅安全配置?.subscription?.enabled) {
