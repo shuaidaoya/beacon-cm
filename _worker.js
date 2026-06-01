@@ -381,6 +381,7 @@ export default {
 		} else {
 			if (url.protocol === 'http:') return Response.redirect(url.href.replace(`http://${url.hostname}`, `https://${url.hostname}`), 301);
 			if (访问路径 === '' && 管理员密码 && env.KV && typeof env.KV.get === 'function') return fetch(Pages静态页面 + '/register' + url.search);
+			if (访问路径 === 'user' || 访问路径.startsWith('user/')) return fetch(Pages静态页面 + '/user' + url.search);
 			if (!管理员密码) return fetch(Pages静态页面 + '/noADMIN').then(r => { const headers = new Headers(r.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(r.body, { status: 404, statusText: r.statusText, headers }) });
 			if (env.KV && typeof env.KV.get === 'function') {
 				const 区分大小写访问路径 = url.pathname.slice(1);
@@ -406,6 +407,7 @@ export default {
 					}
 					return fetch(Pages静态页面 + '/login');
  				} else if (访问路径.startsWith('admin/security/')) {//安全管理静态资源透传
+					if (访问路径.includes('..') || 访问路径.includes('%2e') || 访问路径.includes('%2E')) return new Response('Forbidden', { status: 403 });
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
 					if (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码)) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
@@ -510,15 +512,23 @@ export default {
 								console.error('保存配置失败:', error);
 								return new Response(JSON.stringify({ error: '保存配置失败: ' + error.message }), { status: 500, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 							}
-						} else if (访问路径 === 'admin/tg.json') { // 保存tg.json配置
+						} else if (访问路径 === 'admin/tg.json') { // 保存tg.json配置（同步安全通知开关）
 							try {
 								const newConfig = await request.json();
 								if (newConfig.init && newConfig.init === true) {
 									const TG_JSON = { BotToken: null, ChatID: null };
 									await env.KV.put('tg.json', JSON.stringify(TG_JSON, null, 2));
+									if (安全运行时) {
+										const 当前配置 = await 读取安全配置(env, 安全运行时);
+										await 保存安全配置(env, 安全运行时, 安全深合并(当前配置, { tgSecurityNotifications: { enabled: false } }));
+									}
 								} else {
 									if (!newConfig.BotToken || !newConfig.ChatID) return new Response(JSON.stringify({ error: '配置不完整' }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 									await env.KV.put('tg.json', JSON.stringify(newConfig, null, 2));
+									if (安全运行时) {
+										const 当前配置 = await 读取安全配置(env, 安全运行时);
+										await 保存安全配置(env, 安全运行时, 安全深合并(当前配置, { tgSecurityNotifications: { enabled: true } }));
+									}
 								}
 								ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Save_Config', config_JSON));
 								return new Response(JSON.stringify({ success: true, message: '配置已保存' }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
@@ -6037,19 +6047,20 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 	if (pathname === '/admin/system/tg-config' && request.method === 'POST') {
 		try {
 			const body = await request.json().catch(() => ({}));
-			const tgData = { BotToken: null, ChatID: null, PanelID: 'A' };
-			if (body.BotToken) tgData.BotToken = body.BotToken;
-			if (body.ChatID) tgData.ChatID = String(body.ChatID);
-			if (body.PanelID) tgData.PanelID = String(body.PanelID);
 			const existing = JSON.parse((await env.KV.get('tg.json')) || '{}');
-			await env.KV.put('tg.json', JSON.stringify({ ...existing, ...tgData }, null, 2));
+			const tgData = { ...existing };
+			if (body.BotToken !== undefined) tgData.BotToken = body.BotToken || null;
+			if (body.ChatID !== undefined) tgData.ChatID = body.ChatID ? String(body.ChatID) : null;
+			if (body.PanelID !== undefined) tgData.PanelID = String(body.PanelID) || 'A';
+			await env.KV.put('tg.json', JSON.stringify(tgData, null, 2));
+			let notifyEnabled = 当前配置.tgSecurityNotifications?.enabled || false;
 			if (typeof body.securityNotifyEnabled === 'boolean') {
 				const updated = await 保存安全配置(env, 运行时, 安全深合并(当前配置, {
 					tgSecurityNotifications: { enabled: body.securityNotifyEnabled }
 				}));
-				return 安全JSON响应({ success: true, message: 'TG 设置已保存', enabled: updated.tgSecurityNotifications?.enabled || false });
+				notifyEnabled = updated.tgSecurityNotifications?.enabled || false;
 			}
-			return 安全JSON响应({ success: true, message: 'TG 设置已保存' });
+			return 安全JSON响应({ success: true, message: 'TG 设置已保存', securityNotifyEnabled: notifyEnabled });
 		} catch (error) {
 			return 安全JSON响应({ success: false, error: '保存 TG 设置失败: ' + error.message }, 500);
 		}
