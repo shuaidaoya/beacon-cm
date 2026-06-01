@@ -133,6 +133,51 @@ const 安全状态前缀 = 'sys:state:';
 const 安全订阅状态前缀 = 'sys:subscription-state:';
 const 安全注册日志前缀 = 'sys:reglog:';
 const 安全注册定时任务前缀 = 'sys:regtask:';
+// ===== D1 数据库 ===== (用户管理 KV → D1 迁移)
+let DB实例 = null;
+function 初始化D1(env) { if (env.DB && typeof env.DB.prepare === 'function') DB实例 = env.DB; }
+async function 确保D1用户表() {
+	if (!DB实例) return;
+	try {
+		await DB实例.prepare(`CREATE TABLE IF NOT EXISTS users (
+			uuid TEXT PRIMARY KEY,
+			userKey TEXT,
+			label TEXT,
+			source TEXT,
+			status TEXT DEFAULT 'active',
+			createdAt INTEGER,
+			updatedAt INTEGER,
+			lastSeenAt INTEGER,
+			bannedAt INTEGER,
+			bannedReason TEXT,
+			subscriptionToken TEXT,
+			subscriptionTokenUpdatedAt INTEGER,
+			subscriptionState TEXT DEFAULT 'active',
+			attributes TEXT DEFAULT '{}'
+		)`).run();
+		await DB实例.prepare(`CREATE INDEX IF NOT EXISTS idx_users_userKey ON users(userKey)`).run();
+		await DB实例.prepare(`CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)`).run();
+	} catch(e) { console.error('D1 建表失败:', e.message); }
+}
+function 用户记录转D1行(user) {
+	return {
+		uuid: user.uuid || '',
+		userKey: user.userKey || null,
+		label: user.label || null,
+		source: user.source || null,
+		status: user.subscriptionState === 'banned' ? 'banned' : (user.status || 'active'),
+		createdAt: user.createdAt || null,
+		updatedAt: user.updatedAt || null,
+		lastSeenAt: user.lastSeenAt || null,
+		bannedAt: user.bannedAt || null,
+		bannedReason: user.bannedReason || null,
+		subscriptionToken: user.subscriptionToken || null,
+		subscriptionTokenUpdatedAt: user.subscriptionTokenUpdatedAt || null,
+		subscriptionState: user.subscriptionState || 'active',
+		attributes: JSON.stringify(user.attributes || {}),
+	};
+}
+
 const DO_STATESTORE_ID = 'STATESTORE_MAIN';
 async function DO可用(env) {
 	return env.STATESTORE && typeof env.STATESTORE.id === 'function';
@@ -182,6 +227,8 @@ export default {
 		const url = new URL(修正请求URL(request.url));
 		const UA = request.headers.get('User-Agent') || 'null';
 		const upgradeHeader = (request.headers.get('Upgrade') || '').toLowerCase(), contentType = (request.headers.get('content-type') || '').toLowerCase();
+		初始化D1(env);
+		ctx.waitUntil(确保D1用户表());
 		const 管理员密码 = env.ADMIN || env.admin || env.PASSWORD || env.password || env.pswd || env.TOKEN || env.KEY || env.UUID || env.uuid;
 		const 加密秘钥 = env.KEY || '勿动此默认密钥，有需求请自行通过添加变量KEY进行修改';
 		const userIDMD5 = await MD5MD5(管理员密码 + 加密秘钥);
@@ -4620,6 +4667,35 @@ async function 安全KV读取JSON(env, key, 默认值 = null) {
 	const kvCacheKey = 'kv:' + key;
 	const cached = 内存缓存获取(kvCacheKey, 内存缓存TTL.KV默认);
 	if (cached) return cached.value;
+	// D1 优先（用户记录）
+	if (DB实例 && key.startsWith(安全用户前缀)) {
+		const uuid = key.slice(安全用户前缀.length);
+		try {
+			const row = await DB实例.prepare('SELECT * FROM users WHERE uuid=?').bind(uuid).first();
+			if (row) {
+				const user = {
+					uuid: row.uuid,
+					userKey: row.userKey,
+					label: row.label,
+					source: row.source,
+					status: row.status,
+					createdAt: row.createdAt,
+					updatedAt: row.updatedAt,
+					lastSeenAt: row.lastSeenAt,
+					bannedAt: row.bannedAt,
+					bannedReason: row.bannedReason,
+					subscriptionToken: row.subscriptionToken,
+					subscriptionTokenUpdatedAt: row.subscriptionTokenUpdatedAt,
+					subscriptionState: row.subscriptionState,
+					attributes: (() => { try { return JSON.parse(row.attributes||'{}'); } catch { return {}; } })(),
+				};
+				内存缓存设置(kvCacheKey, user);
+				return user;
+			}
+			内存缓存设置(kvCacheKey, 默认值);
+			return 默认值;
+		} catch(e) { /* D1 失败 → 回退 KV */ }
+	}
 	const doValue = await DO获取(env, key);
 	if (doValue !== undefined && doValue !== null) {
 		内存缓存设置(kvCacheKey, doValue);
@@ -4642,6 +4718,16 @@ async function 安全KV读取JSON(env, key, 默认值 = null) {
 }
 
 async function 安全KV写入JSON(env, key, value, expirationTtl) {
+	// D1 优先（用户记录）
+	if (DB实例 && key.startsWith(安全用户前缀) && value && typeof value === 'object') {
+		try {
+			const row = 用户记录转D1行(value);
+			await DB实例.prepare(`INSERT OR REPLACE INTO users (uuid,userKey,label,source,status,createdAt,updatedAt,lastSeenAt,bannedAt,bannedReason,subscriptionToken,subscriptionTokenUpdatedAt,subscriptionState,attributes)
+				VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)`)
+				.bind(row.uuid, row.userKey, row.label, row.source, row.status, row.createdAt, row.updatedAt, row.lastSeenAt, row.bannedAt, row.bannedReason, row.subscriptionToken, row.subscriptionTokenUpdatedAt, row.subscriptionState, row.attributes)
+				.run();
+		} catch(e) { /* D1 失败 → 回退 KV */ }
+	}
 	const options = {};
 	if (Number.isFinite(expirationTtl) && expirationTtl > 0) options.expirationTtl = expirationTtl;
 	await env.KV.put(key, JSON.stringify(value), options);
@@ -5251,6 +5337,23 @@ async function 安全列出KV记录(env, prefix, limit = 50) {
 	const cacheKey = 'list:' + prefix + ':' + limit;
 	const cachedList = 内存缓存获取(cacheKey, 内存缓存TTL.用户列表聚合);
 	if (cachedList) return cachedList.value;
+	// D1 优先（用户列表）
+	if (DB实例 && prefix === 安全用户前缀) {
+		try {
+			const safeLimit = Math.min(Math.max(1, limit), 200);
+			const result = await DB实例.prepare('SELECT * FROM users ORDER BY lastSeenAt DESC LIMIT ?').bind(safeLimit).all();
+			const users = (result.results||[]).map(row => ({
+				uuid: row.uuid, userKey: row.userKey, label: row.label, source: row.source,
+				status: row.status, createdAt: row.createdAt, updatedAt: row.updatedAt,
+				lastSeenAt: row.lastSeenAt, bannedAt: row.bannedAt, bannedReason: row.bannedReason,
+				subscriptionToken: row.subscriptionToken, subscriptionTokenUpdatedAt: row.subscriptionTokenUpdatedAt,
+				subscriptionState: row.subscriptionState,
+				attributes: (() => { try { return JSON.parse(row.attributes||'{}'); } catch { return {}; } })(),
+			}));
+			内存缓存设置(cacheKey, users);
+			return users;
+		} catch(e) { /* D1 失败 → 回退 KV */ }
+	}
 	let cursor;
 	const values = [];
 	const safeLimit = Math.min(Math.max(1, limit), 200), scanLimit = Math.min(Math.max(safeLimit * 2, safeLimit), 400);
@@ -5289,6 +5392,25 @@ async function 安全列出KV记录(env, prefix, limit = 50) {
 }
 
 async function 安全分页列出KV(env, prefix, limit = 50, cursor = null) {
+	// D1 优先（用户分页）
+	if (DB实例 && prefix === 安全用户前缀) {
+		try {
+			const safeLimit = Math.min(Math.max(1, limit), 200);
+			const offset = cursor ? parseInt(cursor) : 0;
+			const result = await DB实例.prepare('SELECT * FROM users ORDER BY lastSeenAt DESC LIMIT ? OFFSET ?').bind(safeLimit, offset).all();
+			const users = (result.results||[]).map(row => ({
+				uuid: row.uuid, userKey: row.userKey, label: row.label, source: row.source,
+				status: row.status, createdAt: row.createdAt, updatedAt: row.updatedAt,
+				lastSeenAt: row.lastSeenAt, bannedAt: row.bannedAt, bannedReason: row.bannedReason,
+				subscriptionToken: row.subscriptionToken, subscriptionTokenUpdatedAt: row.subscriptionTokenUpdatedAt,
+				subscriptionState: row.subscriptionState,
+				attributes: (() => { try { return JSON.parse(row.attributes||'{}'); } catch { return {}; } })(),
+			}));
+			const hasMore = users.length === safeLimit;
+			const nextCursor = hasMore ? String(offset + safeLimit) : null;
+			return { values: users, cursor: nextCursor, listComplete: !hasMore };
+		} catch(e) { /* D1 失败 → 回退 KV */ }
+	}
 	const values = [];
 	const page = await env.KV.list({ prefix, limit: Math.min(Math.max(1, limit), 200), cursor: cursor || undefined });
 	const allKeys = page.keys.map(k => k.name);
@@ -5313,6 +5435,13 @@ async function 安全分页列出KV(env, prefix, limit = 50, cursor = null) {
 }
 
 async function 安全统计键数量(env, prefix, maxCount = 1000) {
+	// D1 优先（用户计数）
+	if (DB实例 && prefix === 安全用户前缀) {
+		try {
+			const row = await DB实例.prepare('SELECT COUNT(*) as cnt FROM users').first();
+			return row ? Math.min(row.cnt, maxCount) : 0;
+		} catch(e) { /* D1 失败 → 回退 KV */ }
+	}
 	let cursor, count = 0;
 	const safeMax = Math.min(Math.max(1, maxCount), 5000);
 	do {
