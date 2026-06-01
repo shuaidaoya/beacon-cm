@@ -136,6 +136,37 @@ const 安全注册定时任务前缀 = 'sys:regtask:';
 // ===== D1 数据库 ===== (用户管理 KV → D1 迁移)
 let DB实例 = null;
 function 初始化D1(env) { if (env.DB && typeof env.DB.prepare === 'function') DB实例 = env.DB; }
+function 失效用户缓存(uuid) {
+	if (!uuid) return;
+	const normalizedUUID = String(uuid).toLowerCase();
+	内存缓存.delete('kv:' + 安全用户前缀 + normalizedUUID);
+	内存缓存清除用户列表();
+}
+async function 增加用户已用流量(uuid, bytes, options = {}) {
+	const normalizedUUID = String(uuid || '').toLowerCase();
+	const 增量字节 = Number(bytes || 0);
+	if (!安全UUID有效(normalizedUUID) || !Number.isFinite(增量字节) || 增量字节 <= 0) return false;
+	let wrote = false;
+	if (DB实例) {
+		try {
+			await DB实例.prepare('UPDATE users SET used_traffic=used_traffic+? WHERE uuid=?').bind(增量字节, normalizedUUID).run();
+			wrote = true;
+		} catch (e) { /* D1 失败时继续尝试 KV 同步 */ }
+	}
+	if (options.syncKV !== false && env_global?.KV) {
+		try {
+			const key = 安全用户前缀 + normalizedUUID;
+			const text = await env_global.KV.get(key);
+			if (text) {
+				const user = JSON.parse(text);
+				user.used_traffic = (user.used_traffic || 0) + 增量字节;
+				await env_global.KV.put(key, JSON.stringify(user));
+			}
+		} catch (e) { /* ignore KV sync failure */ }
+	}
+	失效用户缓存(normalizedUUID);
+	return wrote;
+}
 
 // ===== 批量流量累加 (60s flush, beacon-tunnel 对齐) =====
 const 流量累加池 = new Map();
@@ -151,6 +182,7 @@ async function 批量刷写流量() {
 	上次流量刷写时间 = now;
 	const entries = [...流量累加池.entries()];
 	流量累加池.clear();
+	for (const [u] of entries) 失效用户缓存(u);
 	if (DB实例) {
 		try {
 			await DB实例.batch(entries.map(([u, b]) =>
@@ -454,6 +486,42 @@ export default {
 			} catch (error) {
 				console.error('[订阅登录] 接口处理失败:', error?.stack || error?.message || String(error));
 				return 认证JSON响应('AUTH_SIGNIN_FAILED', `登录失败：${error?.message || '服务器内部异常'}`, null, 500);
+			}
+		}
+		if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
+			try {
+				if (request.method !== 'GET') return 认证JSON响应('AUTH_METHOD_NOT_ALLOWED', '请求方式不支持', null, 405);
+				const 运行时 = await 创建安全运行时(env);
+				if (!运行时) return 认证JSON响应('AUTH_STORAGE_UNAVAILABLE', '用户存储未就绪，请先绑定 KV。', null, 503);
+				const uuid = String(url.searchParams.get('uuid') || '').toLowerCase();
+				const token = String(url.searchParams.get('token') || '').trim();
+				if (!安全UUID有效(uuid) || !token) {
+					return 认证JSON响应('AUTH_VALIDATION_ERROR', '请提供有效的 UUID 和 Token。', null, 400);
+				}
+				const user = await 安全获取用户(运行时, uuid);
+				if (!user) {
+					return 认证JSON响应('AUTH_USER_NOT_FOUND', '未找到对应用户，请重新登录。', null, 404);
+				}
+				const expectedToken = await 安全获取订阅访问令牌(url, user);
+				if (token !== expectedToken) {
+					return 认证JSON响应('AUTH_INVALID_TOKEN', '用户凭证已失效，请重新登录。', null, 403);
+				}
+				if (安全用户已封禁(user)) {
+					return 认证JSON响应('AUTH_USER_BANNED', '当前账号已被封禁，请联系管理员解封。', {
+						user: { uuid: user.uuid },
+						status: 'banned',
+					}, 403);
+				}
+				const profile = 安全提取用户展示信息(user);
+				return 认证JSON响应('AUTH_USER_INFO_SUCCESS', '获取成功。', {
+					account: profile.account || user.label || '',
+					email: profile.email || '',
+					user,
+					node: await 安全构建节点订阅信息(url, user),
+				}, 200);
+			} catch (error) {
+				console.error('[用户信息] 接口处理失败:', error?.stack || error?.message || String(error));
+				return 认证JSON响应('AUTH_USER_INFO_FAILED', `获取用户信息失败：${error?.message || '服务器内部异常'}`, null, 500);
 			}
 		}
 		if (访问路径 === 'register/config' && request.method === 'GET') {
@@ -864,20 +932,7 @@ export default {
 						const 流量用户 = 请求订阅用户 || 订阅用户;
 						if (流量用户?.uuid && 订阅内容) {
 							const 字节数 = new TextEncoder().encode(订阅内容).length;
-							ctx.waitUntil((async () => {
-								if (DB实例) {
-									try { await DB实例.prepare('UPDATE users SET used_traffic=used_traffic+? WHERE uuid=?').bind(字节数, 流量用户.uuid).run(); } catch(e) {}
-								}
-								try {
-									const key = 安全用户前缀 + 流量用户.uuid;
-									const text = await env.KV.get(key);
-									if (text) {
-										const u = JSON.parse(text);
-										u.used_traffic = (u.used_traffic || 0) + 字节数;
-										await env.KV.put(key, JSON.stringify(u));
-									}
-								} catch(e) {}
-							})());
+							ctx.waitUntil(增加用户已用流量(流量用户.uuid, 字节数));
 						}
 						return new Response(订阅内容, { status: 200, headers: responseHeaders });
 					}
@@ -1403,10 +1458,12 @@ async function 处理gRPC请求(request, yourUUID) {
 						}
 						if (!payload.byteLength) continue;
 						if (isDnsQuery) {
+							if (当前流量UUID) 批量累加流量(当前流量UUID, payload.byteLength);
 							await forwardataudp(payload, grpcBridge, null);
 							continue;
 						}
 						if (remoteConnWrapper.socket) {
+							if (当前流量UUID) 批量累加流量(当前流量UUID, payload.byteLength);
 							if (!(await 写入远端(payload))) throw new Error('Remote socket is not ready');
 						} else {
 							let 首包buffer;
@@ -1421,6 +1478,7 @@ async function 处理gRPC请求(request, yourUUID) {
 								const 命中节点UUID = await 安全通过木马密码获取UUID(安全运行时, 默认节点UUID, 解析结果.passwordHash);
 								if (!命中节点UUID) throw new Error('Invalid trojan request');
 								当前流量UUID = 命中节点UUID;
+								批量累加流量(当前流量UUID, payload.byteLength);
 								const { port, hostname, rawClientData } = 解析结果;
 								//log(`[gRPC] 木马首包: ${hostname}:${port}`);
 								if (isSpeedTestSite(hostname)) throw new Error('Speedtest site is blocked');
@@ -1430,6 +1488,7 @@ async function 处理gRPC请求(request, yourUUID) {
 								if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid vless request');
 								if (!(await 安全是否允许节点UUID(安全运行时, 默认节点UUID, 解析结果.clientUUID))) throw new Error('Invalid vless request');
 								当前流量UUID = 解析结果.clientUUID;
+								批量累加流量(当前流量UUID, payload.byteLength);
 								const { port, hostname, rawIndex, version, isUDP } = 解析结果;
 								//log(`[gRPC] 魏烈思首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
 								if (isSpeedTestSite(hostname)) throw new Error('Speedtest site is blocked');
@@ -2246,8 +2305,11 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, us
 				const { done, value } = await reader.read();
 				if (done) break;
 				if (!value || value.byteLength === 0) continue;
+				const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
 				hasData = true;
-				await 发送块(value instanceof Uint8Array ? value : new Uint8Array(value));
+				连接累计字节 += chunk.byteLength;
+				if (userUUID) 批量累加流量(userUUID, chunk.byteLength);
+				await 发送块(chunk);
 			}
 		} else {
 			let mainBuf = new ArrayBuffer(BYOB缓冲区大小), offset = 0, totalBytes = 0;
@@ -2306,10 +2368,8 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, us
 	} catch (err) { closeSocketQuietly(webSocket) }
 	finally { try { reader.cancel() } catch (e) { } try { reader.releaseLock() } catch (e) { } }
 	// beacon-tunnel 对齐：直接 D1 更新 + 批量刷写
-	if (userUUID && 连接累计字节 > 0 && DB实例) {
-		try {
-			await DB实例.prepare('UPDATE users SET used_traffic=used_traffic+? WHERE uuid=?').bind(连接累计字节, userUUID).run();
-		} catch(e) { /* silent */ }
+	if (userUUID && 连接累计字节 > 0) {
+		await 增加用户已用流量(userUUID, 连接累计字节);
 	}
 	if (!hasData && retryFunc) await retryFunc();
 }
