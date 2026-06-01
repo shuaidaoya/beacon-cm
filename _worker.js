@@ -681,9 +681,11 @@ export default {
 					const 订阅安全配置 = 安全运行时 ? await 读取安全配置(env, 安全运行时) : 获取默认安全配置();
 					const 请求订阅用户 = await 安全获取用户(安全运行时, url.searchParams.get('uuid'));
 					if (请求订阅用户 && 安全用户已封禁(请求订阅用户)) return new Response('当前账号已被封禁，请联系管理员解封', { status: 403 });
+					if (请求订阅用户 && 请求订阅用户.traffic > 0 && (请求订阅用户.used_traffic || 0) >= 请求订阅用户.traffic) return new Response('流量已用完，请联系管理员扩容', { status: 403 });
 					const 订阅UUID = 当前节点UUID;
 					const 订阅用户 = await 安全获取用户(安全运行时, 订阅UUID);
 					if (订阅用户 && 安全用户已封禁(订阅用户)) return new Response('当前账号已被封禁，请联系管理员解封', { status: 403 });
+					if (订阅用户 && 订阅用户.traffic > 0 && (订阅用户.used_traffic || 0) >= 订阅用户.traffic) return new Response('流量已用完，请联系管理员扩容', { status: 403 });
 					const 订阅TOKEN = await 安全获取订阅访问令牌(url, 订阅用户 || { uuid: 订阅UUID }), 作为优选订阅生成器 = ['1', 'true'].includes(env.BEST_SUB) && url.searchParams.get('host') === 'example.com' && url.searchParams.get('uuid') === '00000000-0000-4000-8000-000000000000' && UA.toLowerCase().includes('tunnel (https://github.com/cmliu/edge');
 					if (url.searchParams.get('token') === 订阅TOKEN || 作为优选订阅生成器) {
 						if (订阅用户 && 订阅安全配置?.subscription?.enabled) {
@@ -5197,6 +5199,8 @@ async function 安全确保用户存在(运行时, uuid, 元数据 = {}) {
 		subscriptionToken: 安全生成订阅访问令牌(),
 		subscriptionTokenUpdatedAt: nowMs,
 		subscriptionState: 'active',
+		traffic: 10 * 1024 * 1024 * 1024, // 默认 10GB
+		used_traffic: 0,
 		bannedAt: null,
 		bannedReason: null,
 	};
@@ -5276,7 +5280,10 @@ async function 安全是否允许节点UUID(运行时, 默认UUID, candidateUUID
 	const normalized = String(candidateUUID).toLowerCase();
 	if (normalized === String(默认UUID || '').toLowerCase()) return true;
 	const user = await 安全获取用户(运行时, normalized);
-	return !!user && !安全用户已封禁(user);
+	if (!user || 安全用户已封禁(user)) return false;
+	// 流量超限检查
+	if (user.traffic > 0 && (user.used_traffic || 0) >= user.traffic) return false;
+	return true;
 }
 
 async function 安全设置用户订阅状态(运行时, uuid, enabled, meta = {}, nowMs = Date.now()) {
