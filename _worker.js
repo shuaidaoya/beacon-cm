@@ -200,11 +200,16 @@ async function 确保D1用户表() {
 			subscriptionToken TEXT,
 			subscriptionTokenUpdatedAt INTEGER,
 			subscriptionState TEXT DEFAULT 'active',
-			traffic INTEGER DEFAULT 0,
-			used_traffic INTEGER DEFAULT 0,
-			expiry INTEGER DEFAULT 0,
 			attributes TEXT DEFAULT '{}'
 		)`).run();
+		// 迁移：添加新列（忽略已存在的列）
+		for (const col of [
+			'traffic INTEGER DEFAULT 0',
+			'used_traffic INTEGER DEFAULT 0',
+			'expiry INTEGER DEFAULT 0',
+		]) {
+			try { await DB实例.prepare('ALTER TABLE users ADD COLUMN '+col).run(); } catch(e) { /* 列已存在 */ }
+		}
 		await DB实例.prepare(`CREATE INDEX IF NOT EXISTS idx_users_userKey ON users(userKey)`).run();
 		await DB实例.prepare(`CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)`).run();
 	} catch(e) { console.error('D1 建表失败:', e.message); }
