@@ -5887,8 +5887,11 @@ async function 安全列出KV记录(env, prefix, limit = 50) {
 				traffic: row.traffic || 0, used_traffic: row.used_traffic || 0, expiry: row.expiry || 0,
 				attributes: (() => { try { return JSON.parse(row.attributes||'{}'); } catch { return {}; } })(),
 			}));
-			内存缓存设置(cacheKey, users);
-			return users;
+			if (users.length > 0) {
+				内存缓存设置(cacheKey, users);
+				return users;
+			}
+			// D1 为空 → 回退 KV（迁移期间）
 		} catch(e) { /* D1 失败 → 回退 KV */ }
 	}
 	let cursor;
@@ -5944,9 +5947,12 @@ async function 安全分页列出KV(env, prefix, limit = 50, cursor = null) {
 				traffic: row.traffic || 0, used_traffic: row.used_traffic || 0, expiry: row.expiry || 0,
 				attributes: (() => { try { return JSON.parse(row.attributes||'{}'); } catch { return {}; } })(),
 			}));
-			const hasMore = users.length === safeLimit;
-			const nextCursor = hasMore ? String(offset + safeLimit) : null;
-			return { values: users, cursor: nextCursor, listComplete: !hasMore };
+			if (users.length > 0) {
+				const hasMore = users.length === safeLimit;
+				const nextCursor = hasMore ? String(offset + safeLimit) : null;
+				return { values: users, cursor: nextCursor, listComplete: !hasMore };
+			}
+			// D1 为空 → 回退 KV
 		} catch(e) { /* D1 失败 → 回退 KV */ }
 	}
 	const values = [];
@@ -5977,7 +5983,9 @@ async function 安全统计键数量(env, prefix, maxCount = 1000) {
 	if (DB实例 && prefix === 安全用户前缀) {
 		try {
 			const row = await DB实例.prepare('SELECT COUNT(*) as cnt FROM users').first();
-			return row ? Math.min(row.cnt, maxCount) : 0;
+			const cnt = row ? row.cnt : 0;
+			if (cnt > 0) return Math.min(cnt, maxCount);
+			// D1 为空 → 回退 KV
 		} catch(e) { /* D1 失败 → 回退 KV */ }
 	}
 	let cursor, count = 0;
