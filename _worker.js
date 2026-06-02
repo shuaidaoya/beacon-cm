@@ -213,11 +213,17 @@ async function 读取全局流量() {
 	return { up: 0, down: 0 };
 }
 async function 累加全局流量(upBytes, downBytes) {
+	// D1 累加（建表后重试）
 	if (DB实例) {
+		let ok = false;
 		try {
 			await DB实例.prepare('INSERT OR REPLACE INTO global_traffic (id, up_bytes, down_bytes) VALUES (1, COALESCE((SELECT up_bytes FROM global_traffic WHERE id=1),0)+?1, COALESCE((SELECT down_bytes FROM global_traffic WHERE id=1),0)+?2)').bind(upBytes||0, downBytes||0).run();
+			ok = true;
 		} catch(e) {
 			try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS global_traffic (id INTEGER PRIMARY KEY, up_bytes INTEGER DEFAULT 0, down_bytes INTEGER DEFAULT 0)').run(); } catch(e2) {}
+			if (!ok) {
+				try { await DB实例.prepare('INSERT OR REPLACE INTO global_traffic (id, up_bytes, down_bytes) VALUES (1, COALESCE((SELECT up_bytes FROM global_traffic WHERE id=1),0)+?1, COALESCE((SELECT down_bytes FROM global_traffic WHERE id=1),0)+?2)').bind(upBytes||0, downBytes||0).run(); } catch(e3) {}
+			}
 		}
 	}
 	try {
