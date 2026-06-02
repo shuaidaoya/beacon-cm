@@ -5,9 +5,9 @@ keep_vars = true
 
 [[kv_namespaces]]
 binding = "KV"
-id = ""				# 填入你的 KV 命名空间 ID
+id = "3c41083adc4047108e4cd9ac912a16e2"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "beacon-users"
-database_id = ""			# 填入你的 D1 数据库 ID
+database_id = "c17b4997-81f9-458b-bc7d-07369726f5eb"
