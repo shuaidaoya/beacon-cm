@@ -176,19 +176,24 @@ let DB实例 = null;
 function 初始化D1(env) { if (env.DB && typeof env.DB.prepare === 'function') DB实例 = env.DB; }
 
 // ===== 全局流量统计 (D1/KV 持久化，对齐用户流量方式) =====
-const 活跃用户Map = new Map(); // uuid → connectionCount
-function 用户上线(uuid) { if (!uuid) return; 活跃用户Map.set(uuid, (活跃用户Map.get(uuid) || 0) + 1); 刷写在线人数().catch(()=>{}); }
-function 用户下线(uuid) { if (!uuid) return; const c = (活跃用户Map.get(uuid) || 1) - 1; if (c <= 0) 活跃用户Map.delete(uuid); else 活跃用户Map.set(uuid, c); 刷写在线人数().catch(()=>{}); }
-async function 刷写在线人数() {
-	const count = 活跃用户Map.size;
-	if (DB实例) {
-		try { await DB实例.prepare('INSERT OR REPLACE INTO global_online (id, count, updated_at) VALUES (1, ?, ?)').bind(count, Date.now()).run(); } catch(e) {
-			try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS global_online (id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0, updated_at INTEGER)').run(); } catch(e2) {}
-		}
-	}
-	try { await env_global?.KV?.put('sys:global:active', JSON.stringify({ count, ts: Date.now() })); } catch(e) {}
+// 心跳机制：每个连接定期写入时间戳，统计最近35秒内有心跳的UUID数（跨全球节点统一）
+const 活跃心跳Map = new Map();
+function 用户心跳(uuid) { if (!uuid) return; 活跃心跳Map.set(uuid, Date.now()); 刷写心跳(uuid).catch(()=>{}); }
+async function 刷写心跳(uuid) {
+	if (!uuid) return;
+	const now = Date.now();
+	if (DB实例) try { await DB实例.prepare('INSERT OR REPLACE INTO online_heartbeat (uuid, last_beat) VALUES (?, ?)').bind(uuid, now).run(); } catch(e) { try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS online_heartbeat (uuid TEXT PRIMARY KEY, last_beat INTEGER)').run(); } catch(e2) {} }
+	try { await env_global?.KV?.put('sys:online:' + uuid, JSON.stringify({ ts: now }), { expirationTtl: 60 }); } catch(e) {}
 }
-function 在线人数() { return 活跃用户Map.size; }
+async function 读取在线人数() {
+	let count = 0;
+	const cutoff = Date.now() - 35000;
+	if (DB实例) { try { const r = await DB实例.prepare('SELECT COUNT(*) as cnt FROM online_heartbeat WHERE last_beat > ?').bind(cutoff).first(); if (r) count = r.cnt || 0; } catch(e) {} }
+	if (count === 0) { try { const list = await env_global?.KV?.list({ prefix: 'sys:online:' }); if (list) count = list.keys.length; } catch(e) {} }
+	for (const [k, v] of 活跃心跳Map) { if (v < cutoff) 活跃心跳Map.delete(k); }
+	if (count === 0) count = 活跃心跳Map.size;
+	return count;
+}
 function 格式化字节(b) { if (!b || b <= 0) return '0 B'; const k = 1024, u = ['B', 'KB', 'MB', 'GB', 'TB']; const i = Math.floor(Math.log(b) / Math.log(k)); return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + u[i]; }
 async function 同步在线人数() {
 	try { await env_global?.KV?.put('sys:global:active', JSON.stringify({ count: 活跃用户Map.size, ts: Date.now() })); } catch(e) {}
@@ -672,11 +677,7 @@ export default {
 		}
 		if (访问路径 === 'api/stats' && request.method === 'GET') {
 			const stats = await 读取全局流量();
-			let online = 在线人数();
-			if (online === 0) {
-				try { const d = JSON.parse(await env.KV.get('sys:global:active') || '{}'); if (d.count != null && d.count > 0) online = d.count; } catch(e) {}
-				if (online === 0 && DB实例) { try { const r = await DB实例.prepare('SELECT count FROM global_online WHERE id=1').first(); if (r) online = r.count || 0; } catch(e) {} }
-			}
+			const online = await 读取在线人数();
 			return new Response(JSON.stringify({
 				累计上行: 格式化字节(stats.up),
 				累计下行: 格式化字节(stats.down),
@@ -2270,7 +2271,7 @@ async function SSAEAD解密(cryptoKey, nonceCounter, ciphertext) {
 }
 
 async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnWrapper, yourUUID) {
-	用户上线(yourUUID);
+	用户心跳(yourUUID);
 	log(`[TCP转发] 目标: ${host}:${portNum} | 反代IP: ${反代IP} | 反代兜底: ${启用反代兜底 ? '是' : '否'} | 反代类型: ${启用SOCKS5反代 || 'proxyip'} | 全局: ${启用SOCKS5全局反代 ? '是' : '否'}`);
 	const 连接超时毫秒 = 1000;
 	let 已通过代理发送首包 = false;
@@ -2361,7 +2362,6 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 			if (remoteConnWrapper.connectingPromise === 当前连接任务) {
 				remoteConnWrapper.connectingPromise = null;
 			}
-			用户下线(yourUUID);
 		}
 	}
 	remoteConnWrapper.retryConnect = async () => connecttoPry(!已通过代理发送首包);
@@ -2439,6 +2439,7 @@ async function WebSocket发送并等待(webSocket, payload) {
 async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, userUUID = null) {
 	let header = headerData, hasData = false, reader, useBYOB = false;
 	let 连接累计字节 = 0; // per-connection total (beacon-tunnel 对齐)
+	const 心跳定时器 = userUUID ? setInterval(() => 用户心跳(userUUID), 10000) : null;
 	const BYOB缓冲区大小 = 512 * 1024, BYOB单次读取上限 = 64 * 1024, BYOB高吞吐阈值 = 50 * 1024 * 1024;
 	const BYOB慢速刷新间隔 = 20, BYOB快速刷新间隔 = 2, BYOB安全阈值 = BYOB缓冲区大小 - BYOB单次读取上限;
 
@@ -2523,7 +2524,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, us
 			if (flush定时器) { clearTimeout(flush定时器); flush定时器 = null }
 		}
 	} catch (err) { closeSocketQuietly(webSocket) }
-	finally { try { reader.cancel() } catch (e) { } try { reader.releaseLock() } catch (e) { } }
+	finally { try { reader.cancel() } catch (e) { } try { reader.releaseLock() } catch (e) { } if (心跳定时器) clearInterval(心跳定时器); }
 	// beacon-tunnel 对齐：直接 D1 更新 + 批量刷写
 	if (userUUID && 连接累计字节 > 0) {
 		await 增加用户已用流量(userUUID, 连接累计字节);
