@@ -136,6 +136,10 @@ const 安全注册定时任务前缀 = 'sys:regtask:';
 // ===== D1 数据库 ===== (用户管理 KV → D1 迁移)
 let DB实例 = null;
 function 初始化D1(env) { if (env.DB && typeof env.DB.prepare === 'function') DB实例 = env.DB; }
+
+// ===== 全局流量统计 (beacon-tunnel 对齐) =====
+let 全局累计上行 = 0, 全局累计下行 = 0, 全局启动时间 = Date.now();
+function 格式化字节(b) { if (!b || b <= 0) return '0 B'; const k = 1024, u = ['B', 'KB', 'MB', 'GB', 'TB']; const i = Math.floor(Math.log(b) / Math.log(k)); return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + u[i]; }
 function 失效用户缓存(uuid) {
 	if (!uuid) return;
 	const normalizedUUID = String(uuid).toLowerCase();
@@ -554,6 +558,13 @@ export default {
 			const cfg = 安全运行时 ? await 读取安全配置(env, 安全运行时) : 获取默认安全配置();
 			return new Response(JSON.stringify({
 				rulesFrequency: cfg.register?.rulesFrequency || 'always',
+			}), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
+		}
+		if (访问路径 === 'api/stats' && request.method === 'GET') {
+			return new Response(JSON.stringify({
+				累计上行: 格式化字节(全局累计上行),
+				累计下行: 格式化字节(全局累计下行),
+				运行时间: Math.floor((Date.now() - 全局启动时间) / 1000) + 's',
 			}), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
 		}
 		if (访问路径 === 'version') {// 版本信息接口
@@ -1897,6 +1908,7 @@ async function 处理WS请求(request, yourUUID, url) {
 
 	readable.pipeTo(new WritableStream({
 		async write(chunk) {
+			全局累计上行 += chunk.byteLength;
 			当前流量UUID && 批量累加流量(当前流量UUID, chunk.byteLength); // upstream counting
 			if (isDnsQuery) return await forwardataudp(chunk, serverSock, null);
 			if (判断协议类型 === 'ss') {
@@ -2363,6 +2375,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, us
 				mainBuf = value.buffer;
 				const len = value.byteLength;
 				连接累计字节 += len;
+				全局累计下行 += len;
 				if (userUUID) 批量累加流量(userUUID, len);
 
 				if (value.byteOffset !== offset) {
