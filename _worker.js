@@ -177,8 +177,17 @@ function 初始化D1(env) { if (env.DB && typeof env.DB.prepare === 'function') 
 
 // ===== 全局流量统计 (D1/KV 持久化，对齐用户流量方式) =====
 const 活跃用户Map = new Map(); // uuid → connectionCount
-function 用户上线(uuid) { if (!uuid) return; 活跃用户Map.set(uuid, (活跃用户Map.get(uuid) || 0) + 1); DO在线加入(env_global, uuid).catch(() => {}); 同步在线人数(); }
-function 用户下线(uuid) { if (!uuid) return; const c = (活跃用户Map.get(uuid) || 1) - 1; if (c <= 0) 活跃用户Map.delete(uuid); else 活跃用户Map.set(uuid, c); DO在线离开(env_global, uuid).catch(() => {}); 同步在线人数(); }
+function 用户上线(uuid) { if (!uuid) return; 活跃用户Map.set(uuid, (活跃用户Map.get(uuid) || 0) + 1); 刷写在线人数().catch(()=>{}); }
+function 用户下线(uuid) { if (!uuid) return; const c = (活跃用户Map.get(uuid) || 1) - 1; if (c <= 0) 活跃用户Map.delete(uuid); else 活跃用户Map.set(uuid, c); 刷写在线人数().catch(()=>{}); }
+async function 刷写在线人数() {
+	const count = 活跃用户Map.size;
+	if (DB实例) {
+		try { await DB实例.prepare('INSERT OR REPLACE INTO global_online (id, count, updated_at) VALUES (1, ?, ?)').bind(count, Date.now()).run(); } catch(e) {
+			try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS global_online (id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0, updated_at INTEGER)').run(); } catch(e2) {}
+		}
+	}
+	try { await env_global?.KV?.put('sys:global:active', JSON.stringify({ count, ts: Date.now() })); } catch(e) {}
+}
 function 在线人数() { return 活跃用户Map.size; }
 function 格式化字节(b) { if (!b || b <= 0) return '0 B'; const k = 1024, u = ['B', 'KB', 'MB', 'GB', 'TB']; const i = Math.floor(Math.log(b) / Math.log(k)); return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + u[i]; }
 async function 同步在线人数() {
@@ -669,6 +678,7 @@ export default {
 				online = doCount;
 			} else if (online === 0) {
 				try { const d = JSON.parse(await env.KV.get('sys:global:active') || '{}'); if (d.count != null && d.count > 0) online = d.count; } catch(e) {}
+				if (online === 0 && DB实例) { try { const r = await DB实例.prepare('SELECT count FROM global_online WHERE id=1').first(); if (r) online = r.count || 0; } catch(e) {} }
 			}
 			return new Response(JSON.stringify({
 				累计上行: 格式化字节(stats.up),
