@@ -10,4 +10,4 @@ binding = "KV"
 [[d1_databases]]
 binding = "DB"
 database_name = "beacon-tunnel-db"
-# database_id = ""   # 在 Cloudflare Dashboard → D1 → beacon-tunnel-db 中复制 ID 填入
+# database_id = "c17b4997-81f9-458b-bc7d-07369726f5eb"   # 在 Cloudflare Dashboard → D1 → beacon-tunnel-db 中复制 ID 填入

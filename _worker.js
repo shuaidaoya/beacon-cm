@@ -1,4 +1,4 @@
-﻿﻿const Version = '2026-04-10 06:03:17';
+﻿const Version = '2026-04-10 06:03:17';
 let connect;
 try {
 	({ connect } = await import('cloudflare:sockets'));
@@ -5604,12 +5604,32 @@ async function 安全根据注册信息获取用户(运行时, payload = {}) {
 	if (安全UUID有效(indexed?.uuid)) {
 		return await 安全获取用户(运行时, indexed.uuid);
 	}
-	// D1 回退：KV 索引缺失时通过 D1 的 userKey 列反查用户
 	if (DB实例) {
 		try {
 			const row = await DB实例.prepare('SELECT uuid FROM users WHERE userKey=? LIMIT 1').bind(userKey).first();
 			if (row && 安全UUID有效(row.uuid)) {
 				return await 安全获取用户(运行时, row.uuid);
+			}
+		} catch(e) { /* D1 不可用时静默回退 */ }
+		try {
+			const account = 安全标准化用户唯一键(payload.account || payload.username || payload.attributes?.account || payload.attributes?.username);
+			const email = 安全标准化用户唯一键(payload.email || payload.attributes?.email);
+			if (account && email) {
+				const likeKey = `%register:%:${account}:${email}`;
+				const row = await DB实例.prepare('SELECT uuid FROM users WHERE userKey LIKE ? LIMIT 1').bind(likeKey).first();
+				if (row && 安全UUID有效(row.uuid)) {
+					return await 安全获取用户(运行时, row.uuid);
+				}
+			}
+			if (email) {
+				const likeEmail = `%"email":"${email.replace(/"/g, '\\"')}"%`;
+				const row = await DB实例.prepare('SELECT uuid, userKey FROM users WHERE attributes LIKE ? LIMIT 1').bind(likeEmail).first();
+				if (row && 安全UUID有效(row.uuid)) {
+					if (row.userKey) {
+						await 安全KV写入JSON(运行时.env, 安全用户索引键(row.userKey), { userKey: row.userKey, uuid: row.uuid, updatedAt: Date.now() });
+					}
+					return await 安全获取用户(运行时, row.uuid);
+				}
 			}
 		} catch(e) { /* D1 不可用时静默回退 */ }
 	}
