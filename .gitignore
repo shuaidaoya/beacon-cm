@@ -36,3 +36,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 log/
+
+# 代码审查文档（本地审查记录，不提交）
+review/
