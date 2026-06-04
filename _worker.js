@@ -1,4 +1,4 @@
-﻿const Version = '2026-04-10 06:03:17';
+const Version = '2026-04-10 06:03:17';
 let connect;
 try {
 	({ connect } = await import('cloudflare:sockets'));
@@ -6624,14 +6624,16 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 	if (pathname === '/admin/system/users' && request.method === 'GET') {
 		const keyword = String(url.searchParams.get('q') || '').trim().toLowerCase();
 		const statusFilter = String(url.searchParams.get('status') || '').trim().toLowerCase();
+		const multiAccountFilter = String(url.searchParams.get('multiAccount') || '').trim().toLowerCase();
+		const multiAccountTypeFilter = String(url.searchParams.get('multiAccountType') || '').trim().toLowerCase();
 		const pageCursor = url.searchParams.get('cursor') || null;
-		const hasFilters = !!(statusFilter || keyword);
+		const hasFilters = !!(statusFilter || keyword || multiAccountFilter);
 		const pageSize = Math.min(limit, 80);
 		const safeConfig = await 读取安全配置(运行时.env, 运行时);
 
 		let rawUsers, nextCursor, hasMore;
 		if (hasFilters) {
-			rawUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, 200);
+			rawUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, 500);
 			nextCursor = null;
 			hasMore = false;
 		} else if (pageCursor) {
@@ -6647,6 +6649,52 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 		}
 
 		const enrichedUsers = await Promise.all(rawUsers.map(user => 安全构建用户管理信息(运行时, url, user, nowMs, safeConfig)));
+
+		// 多账号识别：按 account / email / lastIp / userKey 分组
+		const multiAccountGroups = {};
+		enrichedUsers.forEach(u => {
+			const identityKeys = [
+				{ key: 'account', value: (u.profile?.account || '').toLowerCase() },
+				{ key: 'email', value: (u.profile?.email || '').toLowerCase() },
+				{ key: 'lastIp', value: (u.lastIp || '').toLowerCase() },
+				{ key: 'userKey', value: (u.userKey || '').toLowerCase() },
+			];
+			identityKeys.forEach(({ key, value }) => {
+				if (!value) return;
+				if (!multiAccountGroups[key]) multiAccountGroups[key] = {};
+				if (!multiAccountGroups[key][value]) multiAccountGroups[key][value] = [];
+				multiAccountGroups[key][value].push(u.uuid);
+			});
+		});
+
+		// 为每个用户标记多账号属性
+		enrichedUsers.forEach(u => {
+			const relatedGroups = [];
+			const identityKeys = [
+				{ key: 'account', value: (u.profile?.account || '').toLowerCase() },
+				{ key: 'email', value: (u.profile?.email || '').toLowerCase() },
+				{ key: 'lastIp', value: (u.lastIp || '').toLowerCase() },
+				{ key: 'userKey', value: (u.userKey || '').toLowerCase() },
+			];
+			identityKeys.forEach(({ key, value }) => {
+				if (!value) return;
+				const group = multiAccountGroups[key]?.[value] || [];
+				if (group.length > 1) {
+					relatedGroups.push({
+						type: key,
+						count: group.length,
+						relatedUuids: group.filter(id => id !== u.uuid),
+					});
+				}
+			});
+			u.multiAccount = {
+				isMulti: relatedGroups.length > 0,
+				types: relatedGroups.map(g => g.type),
+				maxCount: Math.max(0, ...relatedGroups.map(g => g.count)),
+				groupDetails: relatedGroups,
+			};
+		});
+
 		const filteredUsers = enrichedUsers.filter((user) => {
 			if (statusFilter && String(user.status || '').toLowerCase() !== statusFilter) return false;
 			if (!keyword) return true;
@@ -6660,9 +6708,18 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 				user.profile?.source,
 			].filter(Boolean).join(' ').toLowerCase();
 			return haystack.includes(keyword);
+		}).filter((user) => {
+			// 多账号筛选：only=仅显示多账号用户, 不带参数则全部显示
+			if (multiAccountFilter === 'only') {
+				if (!user.multiAccount?.isMulti) return false;
+				// 可选：按关联类型二次筛选（如 only+type=ip, only+type=email）
+				if (multiAccountTypeFilter && !(user.multiAccount?.types || []).includes(multiAccountTypeFilter)) return false;
+			}
+			return true;
 		});
 		const sortedUsers = filteredUsers.sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
 		const userCountResult = hasFilters ? null : await 安全统计键数量(运行时.env, 安全用户前缀, 5000);
+		const multiAccountCount = enrichedUsers.filter(u => u.multiAccount?.isMulti).length;
 		return 安全JSON响应({
 			success: true,
 			users: sortedUsers,
@@ -6673,6 +6730,7 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 				filtered: filteredUsers.length,
 				active: hasFilters ? enrichedUsers.filter(item => item.status === 'active').length : null,
 				banned: hasFilters ? enrichedUsers.filter(item => item.status === 'banned').length : null,
+				multiAccountCount,
 			},
 		});
 	}
@@ -8274,7 +8332,7 @@ function 生成安全管理后台注入代码() {
   const shell = document.getElementById('admin-plus-shell');
   if (!shell) { document.querySelector('.admin-plus-layout') && (document.querySelector('.admin-plus-layout').innerHTML = '<div class="admin-plus-panel"><div class="admin-plus-empty">Shell element not found.</div></div>'); return; }
   const layoutEl = shell.querySelector('.admin-plus-layout');
-  const state = { tab: 'overview', overview: null, users: null, usersSummary: null, userSearch: '', userStatusFilter: 'all', selectedUserUuid: null, selectedUserUuids: [], userAudit: [], config: null, registration: null, usersCursor: null, usersHasMore: false, theme: 'spacex', tgState: { botToken: '', chatId: '', panelId: 'A', securityNotifyEnabled: false } };
+  const state = { tab: 'overview', overview: null, users: null, usersSummary: null, userSearch: '', userStatusFilter: 'all', userMultiAccountFilter: '', selectedUserUuid: null, selectedUserUuids: [], userAudit: [], config: null, registration: null, usersCursor: null, usersHasMore: false, theme: 'spacex', tgState: { botToken: '', chatId: '', panelId: 'A', securityNotifyEnabled: false } };
   const cacheTime = {};
   const cacheTTL = { overview: 8000, users: 15000, config: 20000, registration: 10000 };
 
@@ -8575,9 +8633,10 @@ function 生成安全管理后台注入代码() {
       if (tab === 'overview') state.overview = await api('/admin/system?limit=20');
       if (tab === 'users') {
         const statusParam = state.userStatusFilter && state.userStatusFilter !== 'all' ? ('&status=' + encodeURIComponent(state.userStatusFilter)) : '';
+        const multiParam = state.userMultiAccountFilter ? '&multiAccount=' + encodeURIComponent(state.userMultiAccountFilter) : '';
         state.usersCursor = null;
         state.usersHasMore = false;
-        const userResp = await api('/admin/system/users?limit=80' + statusParam);
+        const userResp = await api('/admin/system/users?limit=80' + statusParam + multiParam);
         state.users = userResp.users || [];
         state.usersSummary = userResp.summary || null;
         state.usersCursor = userResp.cursor || null;
@@ -8646,6 +8705,15 @@ function 生成安全管理后台注入代码() {
     return { label: '低风险', className: '' };
   }
 
+  function getMultiAccountMeta(user) {
+    const ma = user && user.multiAccount;
+    if (!ma || !ma.isMulti) return { label: '-', className: '' };
+    const typeLabels = { account: '同名', email: '同邮箱', lastIp: '同IP', userKey: '同身份' };
+    const types = (ma.types || []).map(t => typeLabels[t] || t);
+    const count = ma.maxCount > 2 ? (' x' + ma.maxCount) : '';
+    return { label: types.join('+') + count, className: ' warn' };
+  }
+
   function renderTrendMini(trend) {
     const items = Array.isArray(trend) ? trend.slice(-24) : [];
     if (!items.length) return '-';
@@ -8665,6 +8733,11 @@ function 生成安全管理后台注入代码() {
   function closeTrafficLimitDialog() {
     const modal = document.getElementById('admin-plus-traffic-modal');
     if (modal) modal.remove();
+  }
+
+  function closeUserDrawer() {
+    const d = document.getElementById('admin-plus-user-drawer');
+    if (d) d.remove();
   }
 
   function openTrafficLimitDialog(user) {
@@ -8876,14 +8949,15 @@ function 生成安全管理后台注入代码() {
         card('筛选结果', filteredUsers.length) +
         card('正常用户', summary.active != null ? summary.active : '-') +
         card('封禁用户', summary.banned != null ? summary.banned : '-') +
-      '</div>',
-      '<div class="admin-plus-panel"><div class="admin-plus-panel-header-wrap"><div><h3>用户列表</h3><div class="admin-plus-desc">支持按用户名、邮箱、UUID、IP 搜索，并执行批量封禁、解封、设置总限额、重置订阅和删除用户。</div></div><div class="admin-plus-toolbar"><input id="admin-plus-user-search" class="admin-plus-inline-input" placeholder="搜索 用户名 / 邮箱 / UUID / IP" value="' + escapeHtml(state.userSearch || '') + '" /><select id="admin-plus-user-status-filter" class="admin-plus-inline-input" style="min-width:160px"><option value="all"' + (state.userStatusFilter === 'all' ? ' selected' : '') + '>全部状态</option><option value="active"' + (state.userStatusFilter === 'active' ? ' selected' : '') + '>正常</option><option value="banned"' + (state.userStatusFilter === 'banned' ? ' selected' : '') + '>已封禁</option></select><button class="admin-plus-btn secondary" type="button" id="admin-plus-select-filtered">全选当前筛选</button><button class="admin-plus-btn secondary" type="button" id="admin-plus-clear-selection">清空选择</button><a class="admin-plus-btn secondary" href="/register" target="_blank" rel="noreferrer">打开用户面板</a></div></div><div class="admin-plus-empty" style="padding:16px 20px;align-items:flex-start;text-align:left">已选择 ' + escapeHtml(selectedCount) + ' 个用户，可直接执行批量动作。<div class="admin-plus-actions"><button class="admin-plus-btn warn" type="button" data-batch-action="ban">批量封禁</button><button class="admin-plus-btn" type="button" data-batch-action="restore">批量解封</button><button class="admin-plus-btn secondary" type="button" data-batch-action="reset-subscription">批量重置订阅</button><button class="admin-plus-btn warn" type="button" data-batch-action="delete">批量删除</button></div></div>',
-      renderTable(['选择', '用户名', '邮箱', 'UUID', '状态', '总限额', '最近活跃', '操作'], filteredUsers.map(item => [
+      '</div>' + (summary.multiAccountCount ? '<div style="text-align:center;margin-bottom:8px"><span style="font-size:12px;color:#ef4444;padding:4px 14px;background:#fee2e2;border-radius:999px;font-weight:600">⚠️ 多账号用户: ' + summary.multiAccountCount + '</span></div>' : ''),
+      '<div class="admin-plus-panel"><div class="admin-plus-panel-header-wrap"><div><h3>用户列表</h3><div class="admin-plus-desc">支持按用户名、邮箱、UUID、IP 搜索，并执行批量封禁、解封、设置总限额、重置订阅和删除用户。</div></div><div class="admin-plus-toolbar"><input id="admin-plus-user-search" class="admin-plus-inline-input" placeholder="搜索 用户名 / 邮箱 / UUID / IP" value="' + escapeHtml(state.userSearch || '') + '" /><select id="admin-plus-user-status-filter" class="admin-plus-inline-input" style="min-width:160px"><option value="all"' + (state.userStatusFilter === 'all' ? ' selected' : '') + '>全部状态</option><option value="active"' + (state.userStatusFilter === 'active' ? ' selected' : '') + '>正常</option><option value="banned"' + (state.userStatusFilter === 'banned' ? ' selected' : '') + '>已封禁</option></select><select id="admin-plus-user-multiaccount-filter" class="admin-plus-inline-input" style="min-width:140px"><option value="">全部用户</option><option value="only"' + (state.userMultiAccountFilter === 'only' ? ' selected' : '') + '>多账号用户</option></select><button class="admin-plus-btn secondary" type="button" id="admin-plus-select-filtered">全选当前筛选</button><button class="admin-plus-btn secondary" type="button" id="admin-plus-clear-selection">清空选择</button><a class="admin-plus-btn secondary" href="/register" target="_blank" rel="noreferrer">打开用户面板</a></div></div><div class="admin-plus-empty" style="padding:16px 20px;align-items:flex-start;text-align:left">已选择 ' + escapeHtml(selectedCount) + ' 个用户，可直接执行批量动作。<div class="admin-plus-actions"><button class="admin-plus-btn warn" type="button" data-batch-action="ban">批量封禁</button><button class="admin-plus-btn" type="button" data-batch-action="restore">批量解封</button><button class="admin-plus-btn secondary" type="button" data-batch-action="reset-subscription">批量重置订阅</button><button class="admin-plus-btn warn" type="button" data-batch-action="delete">批量删除</button></div></div>',
+      renderTable(['选择', '用户名', '邮箱', 'UUID', '状态', '多账号', '总限额', '最近活跃', '操作'], filteredUsers.map(item => [
         '<input type="checkbox" data-user-toggle="' + escapeHtml(item.uuid) + '"' + (selectedSet.has(item.uuid) ? ' checked' : '') + ' />',
         escapeHtml(item.profile && item.profile.account || item.label || '-'),
         escapeHtml(item.profile && item.profile.email || '-'),
         '<code>' + escapeHtml(item.uuid || '-') + '</code>',
         '<span class="admin-plus-badge' + getUserStatusMeta(item).className + '">' + escapeHtml(getUserStatusMeta(item).label) + '</span>',
+        '<span class="admin-plus-badge' + getMultiAccountMeta(item).className + '">' + escapeHtml(getMultiAccountMeta(item).label) + '</span>',
         escapeHtml(fmtQuotaAdmin(item.traffic)),
         escapeHtml(fmtTime(item.lastSeenAt)),
         '<div class="admin-plus-actions">' +
@@ -8916,6 +8990,7 @@ function 生成安全管理后台注入代码() {
           detail('邮箱', selectedUser.profile && selectedUser.profile.email || '-') +
           detail('UUID', '<code>' + escapeHtml(selectedUser.uuid || '-') + '</code>') +
           detail('状态', '<span class="admin-plus-badge' + selectedStatus.className + '">' + escapeHtml(selectedStatus.label) + '</span>') +
+          detail('多账号', '<span class="admin-plus-badge' + getMultiAccountMeta(selectedUser).className + '">' + escapeHtml(getMultiAccountMeta(selectedUser).label) + '</span>') +
           detail('账号状态', '<span class="admin-plus-badge' + ((selectedUser.subscription && selectedUser.subscription.status === 'banned') ? ' warn' : '') + '">' + escapeHtml(selectedUser.subscription && selectedUser.subscription.status === 'banned' ? '已封禁' : '正常') + '</span>') +
           detail('来源', escapeHtml(selectedUser.profile && selectedUser.profile.source || '-')) +
           detail('创建时间', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.createdAt))) +
@@ -9108,6 +9183,16 @@ function 生成安全管理后台注入代码() {
     const userStatusFilter = document.getElementById('admin-plus-user-status-filter');
     if (userStatusFilter) userStatusFilter.onchange = async () => {
       state.userStatusFilter = userStatusFilter.value || 'all';
+      state.selectedUserUuids = [];
+      state.users = null;
+      state.usersCursor = null;
+      state.usersHasMore = false;
+      state.usersTotalCount = 0;
+      await loadTab('users', true);
+    };
+    const userMultiAccountFilter = document.getElementById('admin-plus-user-multiaccount-filter');
+    if (userMultiAccountFilter) userMultiAccountFilter.onchange = async () => {
+      state.userMultiAccountFilter = userMultiAccountFilter.value || '';
       state.selectedUserUuids = [];
       state.users = null;
       state.usersCursor = null;
