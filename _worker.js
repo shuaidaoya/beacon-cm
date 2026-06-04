@@ -531,7 +531,7 @@ export default {
 		const 安全上下文 = 是注册面板请求 ? null : await 安全预处理({ request, env, ctx, url, 访问IP, UA, 管理员密码, 已登录后台管理员 });
 		if (安全上下文?.response) return 安全上下文.response;
 		if (访问路径 === 'register' || 访问路径 === 'register/') {
-			return new Response(null, { status: 301, headers: { Location: '/' } });
+			return new Response(null, { status: 302, headers: { Location: '/' + (url.search || '') } });
 		}
 		if (访问路径 === 'register/api' || 访问路径 === 'register/api/') {
 			try {
@@ -714,7 +714,7 @@ export default {
 			return await 处理XHTTP请求(request, { 默认UUID: 当前节点UUID, 运行时: 安全运行时 });
 		} else {
 			if (url.protocol === 'http:') return Response.redirect(url.href.replace(`http://${url.hostname}`, `https://${url.hostname}`), 301);
-			if (访问路径 === '' && 管理员密码 && env.KV && typeof env.KV.get === 'function') return fetch(Pages静态页面 + '/register' + url.search);
+			if (访问路径 === '' && env.KV && typeof env.KV.get === 'function') return fetch(Pages静态页面 + '/register' + url.search);
 			if (访问路径 === 'user' || 访问路径.startsWith('user/')) return fetch(Pages静态页面 + '/user' + url.search);
 			if (!管理员密码) return fetch(Pages静态页面 + '/noADMIN').then(r => { const headers = new Headers(r.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(r.body, { status: 404, statusText: r.statusText, headers }) });
 			if (env.KV && typeof env.KV.get === 'function') {
