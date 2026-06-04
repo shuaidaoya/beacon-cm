@@ -1,4 +1,4 @@
-﻿const Version = '2026-04-10 06:03:17';
+﻿﻿const Version = '2026-04-10 06:03:17';
 let connect;
 try {
 	({ connect } = await import('cloudflare:sockets'));
