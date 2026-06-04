@@ -5032,7 +5032,6 @@ async function 安全KV读取JSON(env, key, 默认值 = null) {
 	const kvCacheKey = 'kv:' + key;
 	const cached = 内存缓存获取(kvCacheKey, 内存缓存TTL.KV默认);
 	if (cached) return cached.value;
-	// D1 优先（用户记录）
 	if (DB实例 && key.startsWith(安全用户前缀)) {
 		const uuid = key.slice(安全用户前缀.length);
 		try {
@@ -5060,8 +5059,6 @@ async function 安全KV读取JSON(env, key, 默认值 = null) {
 				内存缓存设置(kvCacheKey, user);
 				return user;
 			}
-			内存缓存设置(kvCacheKey, 默认值);
-			return 默认值;
 		} catch(e) { /* D1 失败 → 回退 KV */ }
 	}
 	const doValue = await DO获取(env, key);
