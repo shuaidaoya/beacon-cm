@@ -745,7 +745,12 @@ export default {
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
 					if (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码)) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
-					return fetch(Pages静态页面 + '/' + 访问路径 + url.search);
+					const 安全资源响应 = await fetch(Pages静态页面 + '/' + 访问路径 + url.search);
+					const 安全资源Headers = new Headers(安全资源响应.headers);
+					安全资源Headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+					安全资源Headers.set('Pragma', 'no-cache');
+					安全资源Headers.set('Expires', '0');
+					return new Response(安全资源响应.body, { status: 安全资源响应.status, statusText: 安全资源响应.statusText, headers: 安全资源Headers });
  				} else if (访问路径 === 'admin' || 访问路径.startsWith('admin/')) {//验证cookie后响应管理页面
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
@@ -897,7 +902,9 @@ export default {
 				if (contentType.includes('text/html')) {
 					const 后台HTML = await 后台响应.text();
 					const headers = new Headers(后台响应.headers);
-					headers.set('Cache-Control', 'no-store');
+					headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+					headers.set('Pragma', 'no-cache');
+					headers.set('Expires', '0');
 					return new Response(后台HTML, { status: 后台响应.status, statusText: 后台响应.statusText, headers });
 				}
 				return 后台响应;
@@ -8976,120 +8983,53 @@ function 生成安全管理后台注入代码() {
       '</div>'
       + '<div style="margin-top:16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px"><span style="color:var(--ap-text-muted);font-size:13px">当前显示 ' + escapeHtml(users.length || 0) + ' 名用户' + (state.usersTotalCount && !state.userStatusFilter ? (' / 共 ' + escapeHtml(state.usersTotalCount) + ' 名') : '') + '</span>' + (state.usersHasMore ? '<button class="admin-plus-btn secondary" id="admin-plus-load-more" type="button"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:14px;height:14px;"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg> 加载更多</button>' : '') + (state.usersHasMore ? '' : '<span style="color:var(--ap-text-muted);font-size:13px">已显示全部用户</span>') + '</div>'
       ,
-      selectedUser ? (() => {
-        const subBanned = !!(selectedUser.subscription && selectedUser.subscription.status === 'banned');
-        const activeBan = selectedUser.activeBan;
-        const banReasonText = (() => {
-          if (activeBan) return (activeBan.reasonType || '-') + ' / ' + (activeBan.reasonDetail || '-');
-          if (subBanned) return selectedUser.subscription.bannedReasonLabel || selectedUser.subscription.bannedReason || '订阅风控触发自动封禁';
-          return '';
-        })();
-        const banBanner = (subBanned || activeBan) ? (
-          '<div style="display:flex;align-items:flex-start;gap:14px;padding:16px 18px;margin:0 0 18px 0;background:linear-gradient(135deg,rgba(239,68,68,.18),rgba(239,68,68,.06));border:1px solid rgba(239,68,68,.45);border-radius:10px;box-shadow:0 2px 12px rgba(239,68,68,.15)">' +
-            '<div style="font-size:28px;line-height:1">🚫</div>' +
-            '<div style="flex:1;min-width:0">' +
-              '<div style="font-size:15px;font-weight:700;color:#fecaca;margin-bottom:6px;letter-spacing:.5px">该用户当前处于封禁状态</div>' +
-              '<div style="font-size:13px;color:#fca5a5;line-height:1.7"><strong style="color:#fff">封禁原因：</strong>' + escapeHtml(banReasonText) + '</div>' +
-              '<div style="display:flex;flex-wrap:wrap;gap:18px;margin-top:6px;font-size:12px;color:#fca5a5">' +
-                '<span><strong style="color:#fff">账号封禁时间：</strong>' + escapeHtml(fmtTime(selectedUser.subscription && selectedUser.subscription.bannedAt)) + '</span>' +
-                (activeBan ? '<span><strong style="color:#fff">预计解封：</strong>' + escapeHtml(fmtTime(activeBan.expiresAt)) + '</span>' : '<span style="color:#fda4af">需要管理员手动解封</span>') +
-                (activeBan ? '<span><strong style="color:#fff">触发类型：</strong>' + escapeHtml(activeBan.reasonType || '-') + '</span>' : '') +
-              '</div>' +
-              '<div style="font-size:12px;color:#fda4af;margin-top:6px">⚠️ 封禁期间，该用户无法登录、无法使用订阅，订阅接口会返回 403。</div>' +
-            '</div>' +
-            '<button class="admin-plus-btn tiny" data-user-action="restore" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '" style="background:#22c55e;border:none;color:#fff;font-weight:600;padding:8px 14px;white-space:nowrap">立即解封</button>' +
-          '</div>'
-        ) : '';
-        const used = Number(selectedUser.used_traffic || 0);
-        const total = Number(selectedUser.traffic || 0);
-        const unlimited = !total || total <= 0;
-        const trafficPct = unlimited ? 0 : Math.min(100, Math.round((used / total) * 100));
-        const trafficColor = trafficPct >= 90 ? '#ef4444' : trafficPct >= 70 ? '#f59e0b' : '#10b981';
-        const trafficBlock = (
-          '<div class="admin-plus-panel" style="margin-top:14px"><h4 style="margin:0 0 10px 0;font-size:13px;color:var(--ap-text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px">流量配额</h4>' +
-            '<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">' +
-              '<span style="font-size:24px;font-weight:700;color:' + trafficColor + '">' + escapeHtml(fmtBytesAdmin(used)) + '</span>' +
-              '<span style="font-size:14px;color:var(--ap-text-muted)">/ ' + escapeHtml(unlimited ? '不限' : fmtQuotaAdmin(total)) + '</span>' +
-              (!unlimited ? '<span style="font-size:12px;color:' + trafficColor + '">（' + trafficPct + '%）</span>' : '') +
-            '</div>' +
-            (unlimited ? '' : '<div style="margin-top:8px;height:8px;background:rgba(255,255,255,.06);border-radius:4px;overflow:hidden"><div style="height:100%;width:' + trafficPct + '%;background:' + trafficColor + ';border-radius:4px;transition:width .3s"></div></div>') +
-          '</div>'
-        );
-        const detailGroup = (title, items) => (
-          '<div class="admin-plus-panel" style="margin-top:14px"><h4 style="margin:0 0 10px 0;font-size:13px;color:var(--ap-text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px">' + escapeHtml(title) + '</h4>' +
-          '<div class="admin-plus-detail-grid">' + items.join('') + '</div></div>'
-        );
-        const basicGroup = detailGroup('账号信息', [
-          detail('用户名', '<strong>' + escapeHtml(selectedUser.profile && selectedUser.profile.account || '-') + '</strong>'),
-          detail('邮箱', escapeHtml(selectedUser.profile && selectedUser.profile.email || '-')),
-          detail('UUID', '<code style="font-size:11px">' + escapeHtml(selectedUser.uuid || '-') + '</code>'),
-          detail('来源', escapeHtml(selectedUser.profile && selectedUser.profile.source || '-')),
-          detail('创建时间', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.createdAt))),
-          detail('更新时间', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.updatedAt))),
-          detail('最近活跃', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.lastSeenAt))),
-          detail('最后来源 IP', escapeHtml(selectedUser.lastIp || '-')),
-        ]);
-        const monitorGroup = detailGroup('订阅监控', [
-          detail('本小时订阅', '<strong>' + escapeHtml(monitor ? monitor.hourlyCount : 0) + ' / ' + escapeHtml(hourlyLimit) + '</strong>'),
-          detail('本小时无效令牌', '<strong>' + escapeHtml(monitor ? monitor.hourlyInvalidTokenCount : 0) + '</strong>'),
-          detail('本小时来源 IP 数', '<strong>' + escapeHtml(monitor ? monitor.uniqueIpCount : 0) + '</strong>'),
-          detail('本小时客户端数', '<strong>' + escapeHtml(monitor ? monitor.uniqueUaCount : 0) + '</strong>'),
-          detail('当日超限次数', '<strong style="color:' + ((risk && risk.dailyLimitHitCount > 0) ? '#f59e0b' : 'inherit') + '">' + escapeHtml(risk && risk.dailyLimitHitCount || 0) + '</strong>'),
-          detail('最近订阅时间', escapeHtml(fmtTime(monitor && monitor.lastRequestAt))),
-          detail('最近订阅 IP', escapeHtml(monitor && monitor.lastRequestIp || '-')),
-          detail('最近客户端', '<span style="font-size:11px;word-break:break-all">' + escapeHtml(monitor && monitor.lastRequestUserAgent || '-') + '</span>'),
-          detail('最近订阅类型', '<code>' + escapeHtml(monitor && monitor.lastTarget || '-') + '</code>'),
-          detail('最近无效令牌时间', escapeHtml(fmtTime(monitor && monitor.lastInvalidTokenAt))),
-          detail('最近无效令牌来源', escapeHtml(monitor && monitor.lastInvalidTokenIp || '-')),
-          detail('最近超限时间', escapeHtml(fmtTime(monitor && monitor.lastLimitExceededAt))),
-        ]);
-        const riskGroup = detailGroup('封禁与风控', [
-          detail('账号状态', '<span class="admin-plus-badge' + (subBanned ? ' warn' : '') + '">' + escapeHtml(subBanned ? '已封禁' : '正常') + '</span>'),
-          detail('订阅风险等级', '<span class="admin-plus-badge' + getRiskMeta(risk).className + '">' + escapeHtml(getRiskMeta(risk).label) + '</span>'),
-          detail('订阅风险分', '<strong style="color:' + ((risk && risk.score >= 60) ? '#ef4444' : (risk && risk.score >= 30) ? '#f59e0b' : 'inherit') + '">' + escapeHtml(risk ? risk.score : 0) + '</strong>'),
-          detail('封禁时间', escapeHtml(fmtTime(selectedUser.subscription && selectedUser.subscription.bannedAt))),
-          detail('封禁原因', '<span style="color:' + (subBanned || activeBan ? '#fca5a5' : 'var(--ap-text-muted)') + '">' + escapeHtml(banReasonText || '-') + '</span>'),
-          detail('令牌模式', escapeHtml(selectedUser.subscription && selectedUser.subscription.tokenMode === 'managed' ? '已托管' : '兼容旧令牌')),
-          detail('令牌更新时间', escapeHtml(fmtTime(selectedUser.subscription && selectedUser.subscription.tokenUpdatedAt))),
-        ]);
-        const nodeGroup = detailGroup('节点与订阅', [
-          detail('探活地址', '<a class="admin-plus-link" target="_blank" rel="noreferrer" href="' + escapeHtml(selectedUser.node && selectedUser.node.versionUrl || '#') + '" style="word-break:break-all;font-size:11px">' + escapeHtml(selectedUser.node && selectedUser.node.versionUrl || '-') + '</a>'),
-          detail('订阅地址', '<a class="admin-plus-link" target="_blank" rel="noreferrer" href="' + escapeHtml(selectedUser.node && selectedUser.node.subscriptionUrl || '#') + '" style="word-break:break-all;font-size:11px">' + escapeHtml(selectedUser.node && selectedUser.node.subscriptionUrl || '-') + '</a>'),
-        ]);
-        const trendBlock = '<div class="admin-plus-panel" style="margin-top:14px"><h4 style="margin:0 0 10px 0;font-size:13px;color:var(--ap-text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px">24 小时订阅趋势</h4>' + renderTrendMini(risk && risk.trend24h) + '<div style="font-size:11px;color:var(--ap-text-muted);margin-top:8px;display:flex;flex-wrap:wrap;gap:14px"><span><span style="display:inline-block;width:10px;height:10px;background:#60a5fa;border-radius:2px;margin-right:4px;vertical-align:middle"></span>正常</span><span><span style="display:inline-block;width:10px;height:10px;background:#94a3b8;border-radius:2px;margin-right:4px;vertical-align:middle"></span>无效令牌</span><span><span style="display:inline-block;width:10px;height:10px;background:#f59e0b;border-radius:2px;margin-right:4px;vertical-align:middle"></span>超限</span><span><span style="display:inline-block;width:10px;height:10px;background:#ef4444;border-radius:2px;margin-right:4px;vertical-align:middle"></span>触发封禁</span></div></div>';
-        const auditRows = auditEvents.length > 0
-          ? renderTable(['时间', '动作', '发起主体', '详情'], auditEvents.slice(0, 15).map(item => [
-              escapeHtml(fmtTime(item.createdAt)),
-              '<span class="admin-plus-badge">' + escapeHtml(item.eventType || '-') + '</span>',
-              '<code style="font-size:11px">' + escapeHtml((item.subjectType || '-') + ':' + (item.subjectId || '-')) + '</code>',
-              '<code style="font-size:11px;word-break:break-all">' + escapeHtml(JSON.stringify(item.payload || {})) + '</code>',
-            ]))
-          : '<div class="admin-plus-empty" style="padding:14px 16px">暂无管理员动作记录</div>';
-        const auditBlock = '<div class="admin-plus-panel" style="margin-top:14px"><h4 style="margin:0 0 10px 0;font-size:13px;color:var(--ap-text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px">最近管理员动作</h4>' + auditRows + '</div>';
-        return (
-          '<div class="admin-plus-panel">' +
-            '<div class="admin-plus-panel-header"><h3>用户详情</h3><div class="admin-plus-actions">' +
-              '<button class="admin-plus-btn secondary tiny" data-copy-value="' + escapeHtml(selectedUser.node && selectedUser.node.versionUrl || '') + '" data-copy-label="探活地址">复制探活</button>' +
-              '<button class="admin-plus-btn secondary tiny" data-copy-value="' + escapeHtml(selectedUser.node && selectedUser.node.subscriptionUrl || '') + '" data-copy-label="订阅地址">复制订阅</button>' +
-              '<a class="admin-plus-btn secondary tiny" href="' + escapeHtml(selectedUser.node && selectedUser.node.subscriptionUrl || '#') + '" target="_blank" rel="noreferrer">打开订阅</a>' +
-              (subBanned
-                ? '<button class="admin-plus-btn tiny" data-user-action="restore" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '" style="background:#22c55e;border:none;color:#fff;font-weight:600">解封用户</button>'
-                : '<button class="admin-plus-btn warn tiny" data-user-action="ban" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">封禁用户</button>') +
-              '<button class="admin-plus-btn secondary tiny" data-user-action="set-traffic" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">设置总限额</button>' +
-              '<button class="admin-plus-btn secondary tiny" data-user-action="reset-subscription" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">轮换订阅令牌</button>' +
-              '<button class="admin-plus-btn warn tiny" data-user-action="delete" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">删除用户</button>' +
-            '</div></div>' +
-            banBanner +
-            basicGroup +
-            trafficBlock +
-            monitorGroup +
-            riskGroup +
-            nodeGroup +
-            trendBlock +
-            auditBlock +
-          '</div>'
-        );
-      })() : ''
+      selectedUser ? (
+        '<div class="admin-plus-panel"><div class="admin-plus-panel-header"><h3>用户详情</h3><div class="admin-plus-actions">' +
+          '<button class="admin-plus-btn secondary tiny" data-copy-value="' + escapeHtml(selectedUser.node && selectedUser.node.versionUrl || '') + '" data-copy-label="探活地址">复制探活</button>' +
+          '<a class="admin-plus-btn secondary tiny" href="' + escapeHtml(selectedUser.node && selectedUser.node.subscriptionUrl || '#') + '" target="_blank" rel="noreferrer">打开订阅</a>' +
+          (selectedUser.subscription && selectedUser.subscription.status === 'banned'
+            ? '<button class="admin-plus-btn tiny" data-user-action="restore" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">解封用户</button>'
+            : '<button class="admin-plus-btn warn tiny" data-user-action="ban" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">封禁用户</button>') +
+          '<button class="admin-plus-btn secondary tiny" data-user-action="set-traffic" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">设置总限额</button>' +
+          '<button class="admin-plus-btn secondary tiny" data-user-action="reset-subscription" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">轮换订阅令牌</button>' +
+          '<button class="admin-plus-btn warn tiny" data-user-action="delete" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">删除用户</button>' +
+        '</div></div><div class="admin-plus-detail-grid">' +
+          detail('用户名', selectedUser.profile && selectedUser.profile.account || '-') +
+          detail('邮箱', selectedUser.profile && selectedUser.profile.email || '-') +
+          detail('UUID', '<code>' + escapeHtml(selectedUser.uuid || '-') + '</code>') +
+          detail('状态', '<span class="admin-plus-badge' + selectedStatus.className + '">' + escapeHtml(selectedStatus.label) + '</span>') +
+          detail('账号状态', '<span class="admin-plus-badge' + ((selectedUser.subscription && selectedUser.subscription.status === 'banned') ? ' warn' : '') + '">' + escapeHtml(selectedUser.subscription && selectedUser.subscription.status === 'banned' ? '已封禁' : '正常') + '</span>') +
+          detail('来源', escapeHtml(selectedUser.profile && selectedUser.profile.source || '-')) +
+          detail('创建时间', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.createdAt))) +
+          detail('更新时间', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.updatedAt))) +
+          detail('最近活跃', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.lastSeenAt))) +
+          detail('最后来源 IP', escapeHtml(selectedUser.lastIp || '-')) +
+          detail('已用流量', '<strong>' + escapeHtml(fmtBytesAdmin(selectedUser.used_traffic || 0)) + '</strong>') +
+          detail('总限额', '<strong>' + escapeHtml(fmtQuotaAdmin(selectedUser.traffic)) + '</strong>') +
+          detail('令牌模式', escapeHtml(selectedUser.subscription && selectedUser.subscription.tokenMode === 'managed' ? '已托管' : '兼容旧令牌')) +
+          detail('令牌更新时间', escapeHtml(fmtTime(selectedUser.subscription && selectedUser.subscription.tokenUpdatedAt))) +
+          detail('封禁时间', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.bannedAt))) +
+          detail('本小时订阅次数', '<strong>' + escapeHtml(monitor ? monitor.hourlyCount : 0) + ' / ' + escapeHtml(hourlyLimit) + '</strong>') +
+          detail('本小时无效令牌', '<strong>' + escapeHtml(monitor ? monitor.hourlyInvalidTokenCount : 0) + '</strong>') +
+          detail('本小时来源 IP 数', '<strong>' + escapeHtml(monitor ? monitor.uniqueIpCount : 0) + '</strong>') +
+          detail('本小时客户端数', '<strong>' + escapeHtml(monitor ? monitor.uniqueUaCount : 0) + '</strong>') +
+          detail('订阅风险等级', '<span class="admin-plus-badge' + getRiskMeta(risk).className + '">' + escapeHtml(getRiskMeta(risk).label) + '</span>') +
+          detail('订阅风险分', '<strong>' + escapeHtml(risk ? risk.score : 0) + '</strong>') +
+          detail('风控账号状态', '<span class="admin-plus-badge' + ((selectedUser.subscription && selectedUser.subscription.status === 'banned') ? ' warn' : '') + '">' + escapeHtml(selectedUser.subscription && selectedUser.subscription.status === 'banned' ? '已封禁' : '正常') + '</span>') +
+          detail('封禁原因', escapeHtml(selectedUser.subscription && (selectedUser.subscription.bannedReasonLabel || selectedUser.subscription.bannedReason) || '-')) +
+          detail('当日超限次数', '<strong>' + escapeHtml(risk && risk.dailyLimitHitCount || 0) + '</strong>') +
+          detail('最近订阅时间', escapeHtml(fmtTime(monitor && monitor.lastRequestAt))) +
+          detail('最近订阅 IP', escapeHtml(monitor && monitor.lastRequestIp || '-')) +
+          detail('最近客户端标识', escapeHtml(monitor && monitor.lastRequestUserAgent || '-')) +
+          detail('最近订阅类型', escapeHtml(monitor && monitor.lastTarget || '-')) +
+          detail('最近无效令牌时间', escapeHtml(fmtTime(monitor && monitor.lastInvalidTokenAt))) +
+          detail('最近无效令牌来源', escapeHtml(risk && Array.isArray(risk.recentInvalidTokenIps) && risk.recentInvalidTokenIps.length ? risk.recentInvalidTokenIps.join(' , ') : '-')) +
+          detail('最近订阅来源', escapeHtml(risk && Array.isArray(risk.recentRequestIps) && risk.recentRequestIps.length ? risk.recentRequestIps.join(' , ') : '-')) +
+          detail('最近超限时间', escapeHtml(fmtTime(monitor && monitor.lastLimitExceededAt))) +
+          detail('探活地址', '<a class="admin-plus-link" target="_blank" rel="noreferrer" href="' + escapeHtml(selectedUser.node.versionUrl || '#') + '">' + escapeHtml(selectedUser.node.versionUrl || '-') + '</a>') +
+          detail('订阅地址', '<a class="admin-plus-link" target="_blank" rel="noreferrer" href="' + escapeHtml(selectedUser.node.subscriptionUrl || '#') + '">' + escapeHtml(selectedUser.node.subscriptionUrl || '-') + '</a>') +
+        '</div><div class="admin-plus-panel" style="margin-top:20px"><h3>24 小时订阅趋势</h3>' + renderTrendMini(risk && risk.trend24h) + '</div>' + (selectedUser.activeBan ? '<div class="admin-plus-empty" style="padding:18px 20px;align-items:flex-start;text-align:left">当前封禁原因：' + escapeHtml((selectedUser.activeBan.reasonType || '-') + ' / ' + (selectedUser.activeBan.reasonDetail || '-')) + '；预计解封时间：' + escapeHtml(fmtTime(selectedUser.activeBan.expiresAt)) + '</div>' : '') + ((selectedUser.subscription && selectedUser.subscription.status === 'banned') ? '<div class="admin-plus-empty" style="padding:18px 20px;align-items:flex-start;text-align:left">账号封禁原因：' + escapeHtml(selectedUser.subscription.bannedReasonLabel || selectedUser.subscription.bannedReason || '订阅风控触发自动封禁') + '；封禁时间：' + escapeHtml(fmtTime(selectedUser.subscription.bannedAt)) + '。只有管理员解封后，登录和订阅才会恢复。</div>' : '') + '<div class="admin-plus-empty" style="padding:18px 20px;align-items:flex-start;text-align:left">订阅风控说明：系统会统计当前用户本小时订阅次数、24 小时趋势、无效令牌与来源 IP 扩散情况；一旦命中任一阈值，账号会被直接封禁，只有管理员才能解封。</div><div class="admin-plus-panel" style="margin-top:20px"><h3>最近管理员动作</h3>' + renderTable(['时间', '动作', '发起主体', '详情'], auditEvents.map(item => [escapeHtml(fmtTime(item.createdAt)), '<span class="admin-plus-badge">' + escapeHtml(item.eventType || '-') + '</span>', '<code>' + escapeHtml((item.subjectType || '-') + ':' + (item.subjectId || '-')) + '</code>', '<code>' + escapeHtml(JSON.stringify(item.payload || {})) + '</code>'])) + '</div></div>'
+      ) : ''
     ].join('');
   }
 
