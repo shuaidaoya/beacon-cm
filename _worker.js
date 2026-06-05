@@ -5001,6 +5001,18 @@ async function 安全取消注册定时任务(运行时, taskId, nowMs) {
 	return task;
 }
 
+async function 安全取消所有未执行注册定时任务(运行时, nowMs) {
+	if (!运行时) return { 数量: 0, 任务列表: [] };
+	const 任务列表 = await 安全获取注册定时任务列表(运行时);
+	const 已取消 = [];
+	for (const 任务 of 任务列表) {
+		if (!任务 || 任务.状态 !== 'pending') continue;
+		const result = await 安全取消注册定时任务(运行时, 任务.taskId, nowMs);
+		if (result) 已取消.push(result.taskId);
+	}
+	return { 数量: 已取消.length, 任务列表: 已取消 };
+}
+
 function 安全用户索引键(userKey) {
 	return `${安全用户索引前缀}${安全FNV1a(userKey)}`;
 }
@@ -6505,18 +6517,24 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 	if (pathname === '/admin/system/registration/toggle' && request.method === 'POST') {
 		const payload = await request.json().catch(() => ({}));
 		const enabled = Boolean(payload.enabled);
-		const updated = await 保存安全配置(env, 运行时, 安全深合并(当前配置, { register: { enabled } }));
+		// 手动开关注册时，强制清空定时窗口，并取消所有未执行的注册定时任务，
+		// 避免 schedule-ended / 定时器到期回写 enabled 把手动操作覆盖回去
+		const 取消任务结果 = await 安全取消所有未执行注册定时任务(运行时, nowMs);
+		const updated = await 保存安全配置(env, 运行时, 安全深合并(当前配置, {
+			register: { enabled, scheduleEnabled: false, startAt: null, endAt: null }
+		}));
 		await 安全记录事件(运行时, {
 			eventType: enabled ? 'registration.enabled' : 'registration.disabled',
 			subjectType: 'admin',
 			subjectId: 访问IP,
 			ip: 访问IP,
-			payload: { enabled },
+			payload: { enabled, clearedSchedule: true, cancelledTasks: 取消任务结果.数量 },
 			createdAt: nowMs,
 		});
 		return 安全JSON响应({
 			success: true,
 			enabled: updated.register.enabled,
+			cancelledTasks: 取消任务结果.数量,
 			message: enabled ? '注册功能已开启' : '注册功能已关闭',
 		});
 	}
