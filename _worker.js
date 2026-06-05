@@ -745,7 +745,13 @@ export default {
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
 					if (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码)) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
-					const 安全资源响应 = await fetch(Pages静态页面 + '/' + 访问路径 + url.search);
+					// 加 cache-busting 参数 + 强制 no-cache 请求头，确保拿到 GitHub Pages 最新版本
+					const 资源URL = new URL(Pages静态页面 + '/' + 访问路径);
+					资源URL.searchParams.set('_', String(Date.now()));
+					const 安全资源响应 = await fetch(资源URL.toString(), {
+						headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
+						cf: { cacheTtl: 0, cacheEverything: false }
+					});
 					const 安全资源Headers = new Headers(安全资源响应.headers);
 					安全资源Headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
 					安全资源Headers.set('Pragma', 'no-cache');
@@ -897,7 +903,14 @@ export default {
 					}
 
 				ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Admin_Login', config_JSON));
-				const 后台响应 = await fetch(Pages静态页面 + '/admin' + url.search);
+				// 加 cache-busting 参数 + 强制 no-cache 请求头
+				const 后台URL = new URL(Pages静态页面 + '/admin');
+				if (url.search) 后台URL.search = url.search.slice(1);
+				后台URL.searchParams.set('_', String(Date.now()));
+				const 后台响应 = await fetch(后台URL.toString(), {
+					headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
+					cf: { cacheTtl: 0, cacheEverything: false }
+				});
 				const contentType = 后台响应.headers.get('content-type') || '';
 				if (contentType.includes('text/html')) {
 					const 后台HTML = await 后台响应.text();
