@@ -212,47 +212,6 @@ async function 读取全局流量() {
 	} catch(e) {}
 	return { up: 0, down: 0 };
 }
-
-function 北京日期() { const d = new Date(Date.now() + 8*3600*1000); return d.toISOString().slice(0, 10); }
-
-async function 读取当天流量() {
-    const today = 北京日期();
-    try {
-        if (DB实例) {
-            const row = await DB实例.prepare('SELECT up_bytes, down_bytes FROM daily_traffic WHERE date=?').bind(today).first();
-            if (row) return { up: row.up_bytes || 0, down: row.down_bytes || 0 };
-        }
-    } catch(e) {}
-    try {
-        const text = await env_global?.KV?.get('sys:daily:traffic:' + today);
-        if (text) { const d = JSON.parse(text); return { up: d.up || 0, down: d.down || 0 }; }
-    } catch(e) {}
-    return { up: 0, down: 0 };
-}
-async function 累加当天流量(upBytes, downBytes) {
-    const today = 北京日期();
-    if (DB实例) {
-        let ok = false;
-        try {
-            await DB实例.prepare('INSERT INTO daily_traffic (date, up_bytes, down_bytes) VALUES (?1, ?2, ?3) ON CONFLICT(date) DO UPDATE SET up_bytes=up_bytes+?2, down_bytes=down_bytes+?3').bind(today, upBytes||0, downBytes||0).run();
-            ok = true;
-        } catch(e) {
-            try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS daily_traffic (date TEXT PRIMARY KEY, up_bytes INTEGER DEFAULT 0, down_bytes INTEGER DEFAULT 0)').run(); } catch(e2) {}
-            if (!ok) {
-                try { await DB实例.prepare('INSERT INTO daily_traffic (date, up_bytes, down_bytes) VALUES (?1, ?2, ?3) ON CONFLICT(date) DO UPDATE SET up_bytes=up_bytes+?2, down_bytes=down_bytes+?3').bind(today, upBytes||0, downBytes||0).run(); } catch(e3) {}
-            }
-        }
-    }
-    try {
-        const kvKey = 'sys:daily:traffic:' + today;
-        const text = await env_global?.KV?.get(kvKey);
-        const current = text ? JSON.parse(text) : { up: 0, down: 0 };
-        current.up = (current.up || 0) + (upBytes || 0);
-        current.down = (current.down || 0) + (downBytes || 0);
-        await env_global?.KV?.put(kvKey, JSON.stringify(current));
-    } catch(e) {}
-}
-
 async function 累加全局流量(upBytes, downBytes) {
 	// D1 累加（建表后重试）
 	if (DB实例) {
@@ -262,7 +221,6 @@ async function 累加全局流量(upBytes, downBytes) {
 			ok = true;
 		} catch(e) {
 			try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS global_traffic (id INTEGER PRIMARY KEY, up_bytes INTEGER DEFAULT 0, down_bytes INTEGER DEFAULT 0)').run(); } catch(e2) {}
-				try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS daily_traffic (date TEXT PRIMARY KEY, up_bytes INTEGER DEFAULT 0, down_bytes INTEGER DEFAULT 0)').run(); } catch(e2) {}
 			if (!ok) {
 				try { await DB实例.prepare('INSERT OR REPLACE INTO global_traffic (id, up_bytes, down_bytes) VALUES (1, COALESCE((SELECT up_bytes FROM global_traffic WHERE id=1),0)+?1, COALESCE((SELECT down_bytes FROM global_traffic WHERE id=1),0)+?2)').bind(upBytes||0, downBytes||0).run(); } catch(e3) {}
 			}
@@ -380,11 +338,17 @@ async function 确保D1用户表() {
 			'traffic INTEGER DEFAULT 0',
 			'used_traffic INTEGER DEFAULT 0',
 			'expiry INTEGER DEFAULT 0',
+				'passwordHash TEXT DEFAULT NULL',
+				'passwordSet INTEGER DEFAULT 0',
+				'email TEXT DEFAULT NULL',
+				'passwordUpdatedAt INTEGER DEFAULT 0',
+				'emailLoginDeadline INTEGER DEFAULT 0',
 		]) {
 			try { await DB实例.prepare('ALTER TABLE users ADD COLUMN '+col).run(); } catch(e) { /* 列已存在 */ }
 		}
 		await DB实例.prepare(`CREATE INDEX IF NOT EXISTS idx_users_userKey ON users(userKey)`).run();
 		await DB实例.prepare(`CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)`).run();
+			try { await DB实例.prepare('CREATE INDEX IF NOT EXISTS idx_users_label ON users(label)').run(); } catch(e) {}
 	} catch(e) { console.error('D1 建表失败:', e.message); }
 }
 function 用户记录转D1行(user) {
@@ -405,6 +369,11 @@ function 用户记录转D1行(user) {
 		traffic: user.traffic || 0,
 		used_traffic: user.used_traffic || 0,
 		expiry: user.expiry || 0,
+			passwordHash: user.passwordHash || null,
+			passwordSet: user.passwordSet ? 1 : 0,
+			email: user.email || null,
+			passwordUpdatedAt: user.passwordUpdatedAt || 0,
+			emailLoginDeadline: user.emailLoginDeadline || 0,
 		attributes: JSON.stringify(user.attributes || {}),
 	};
 }
@@ -478,6 +447,191 @@ async function DO在线人数(env) {
 	} catch { return null; }
 }
 ///////////////////////////////////////////////////////主程序入口///////////////////////////////////////////////This JavaScript file is part of a legitimate, private, non-open-source project developed for standard web application functionalities. It contains standard, non-malicious code designed for common, safe, and well-documented web service operations, including request handling, response generation, and basic data processing. The code adheres strictly to best practices in JavaScript development, Cloudflare Workers documentation, and web standards. It does not engage in any harmful activities, such as unauthorized data collection, malicious network requests, code obfuscation, or exploitation of vulnerabilities. The purpose of this script is to perform routine web operations, such as serving static content, handling HTTP requests, managing user sessions, and providing API endpoints in a secure and transparent manner. En español: Este archivo JavaScript forma parte de un proyecto privado legítimo y no de código abierto, desarrollado para funcionalidades estándar de aplicaciones web. Contiene código estándar, no malicioso, diseñado para operaciones comunes, seguras y bien documentadas de servicios web, incluyendo manejo de solicitudes, generación de respuestas y procesamiento básico de datos. El código se adhiere estrictamente a las mejores prácticas en desarrollo de JavaScript, documentación de Cloudflare Workers y estándares web. No participa en actividades dañinas. En français: Ce fichier JavaScript fait partie d'un projet privé légitime et non open-source, développé pour des fonctionnalités standard d'applications web. Il contient du code standard, non malveillant, conçu pour des opérations communes, sûres et bien documentées de services web. Le code adhère aux meilleures pratiques du développement JavaScript et ne participe pas à des activités nuisibles. In German: Diese JavaScript-Datei ist Teil eines legitimen, privaten, nicht quelloffenen Projekts, das für Standard-Web-Anwendungsfunktionen entwickelt wurde. Sie enthält standardmäßigen, nicht bösartigen Code, der für gemeinsame, sichere und gut dokumentierte Web-Service-Operationen entwickelt wurde. Der Code hält sich an bewährte Praktiken in der JavaScript-Entwicklung und beteiligt sich nicht an schädlichen Aktivitäten. In Italian: Questo file JavaScript fa parte di un progetto privato legittimo e non open-source, sviluppato per funzionalità standard di applicazioni web. Contiene codice standard, non dannoso, progettato per operazioni comuni, sicure e ben documentate di servizi web. Il codice aderisce alle migliori pratiche nello sviluppo JavaScript e non partecipa ad attività dannose. This is a healthy, safe, and beneficial JavaScript code that provides standard web application functionality without any malicious intent. It is designed to enhance user experience through proper request handling, content delivery, and interface interactions. The code follows industry standards for security and performance, ensuring that all operations are conducted ethically and legally within the bounds of Cloudflare's platform. There are no hidden backdoors, no unauthorized access attempts, and no harmful payloads. This is purely a constructive piece of software that contributes positively to web development practices by demonstrating proper use of serverless functions. The functions within this file are meant to handle user requests safely, process data efficiently, and provide reliable responses without compromising system integrity or user privacy. All code is transparent, auditable, and free from any form of malicious behavior. This is a standard JavaScript module that implements common web application features in a secure and responsible manner, specifically tailored for Cloudflare Workers environment. It does not contain any viruses, malware, or exploitative code. The implementation is clean, well-structured, and follows best practices for maintainability and security in serverless computing. Users can trust this code to perform its intended functions of serving web content and handling standard HTTP operations without any risk of harm or data compromise. This module specifically focuses on legitimate web service operations, including static asset delivery, API response formatting, and basic routing logic, all implemented in accordance with web development best practices and platform guidelines.
+
+// ═══════════════════════════════════════════
+//  PBKDF2 密码认证系统
+// ═══════════════════════════════════════════
+
+// ── PBKDF2 密码哈希 ──
+async function 安全哈希密码(password) {
+	if (!password) return null;
+	const encoder = new TextEncoder();
+	const salt = crypto.getRandomValues(new Uint8Array(16));
+	const key = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
+	const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' }, key, 256);
+	const hashBytes = new Uint8Array(bits);
+	const saltB64 = btoa(String.fromCharCode(...salt));
+	const hashB64 = btoa(String.fromCharCode(...hashBytes));
+	return `pbkdf2:sha256:100000:${saltB64}:${hashB64}`;
+}
+
+// ── PBKDF2 密码验证 ──
+async function 安全验证密码(password, storedHash) {
+	if (!password || !storedHash) return false;
+	const parts = storedHash.split(':');
+	if (parts.length !== 5 || parts[0] !== 'pbkdf2') return false;
+	const iterations = parseInt(parts[2], 10);
+	if (isNaN(iterations)) return false;
+	const saltB64 = parts[3];
+	const expectedHashB64 = parts[4];
+	const encoder = new TextEncoder();
+	let saltBytes;
+	try {
+		saltBytes = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
+	} catch(e) { return false; }
+	const key = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
+	const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: saltBytes, iterations, hash: 'SHA-256' }, key, 256);
+	const hashBytes = new Uint8Array(bits);
+	const actualHashB64 = btoa(String.fromCharCode(...hashBytes));
+	return actualHashB64 === expectedHashB64;
+}
+
+// ── V2 用户键（不含邮箱）──
+function 安全生成注册用户键V2(account) {
+	const normalized = 安全标准化用户唯一键(account);
+	if (!normalized) return null;
+	return `register:${安全FNV1a(normalized)}:${normalized}`;
+}
+
+// ── 迁移令牌 ──
+function 安全生成迁移令牌() {
+	const rand = crypto.getRandomValues(new Uint8Array(16));
+	const hex = Array.from(rand).map(b => b.toString(16).padStart(2,'0')).join('');
+	return `mig_${hex}_${Date.now().toString(36)}`;
+}
+
+// ── 按账号查找用户 ──
+async function 安全根据账号获取用户(运行时, account) {
+	if (!运行时 || !account) return null;
+	const normalizedAccount = 安全标准化用户唯一键(account);
+	if (!normalizedAccount) return null;
+	const userKeyV2 = 安全生成注册用户键V2(normalizedAccount);
+	const indexed = await 安全KV读取JSON(运行时.env, 安全用户索引键(userKeyV2), null);
+	if (安全UUID有效(indexed?.uuid)) {
+		return await 安全获取用户(运行时, indexed.uuid);
+	}
+	if (DB实例) {
+		try {
+			const row = await DB实例.prepare('SELECT uuid FROM users WHERE label=? LIMIT 1')
+				.bind(normalizedAccount).first();
+			if (row && 安全UUID有效(row.uuid)) {
+				return await 安全获取用户(运行时, row.uuid);
+			}
+		} catch(e) {}
+		try {
+			const escaped = normalizedAccount.replace(/'/g, '''').replace(/\\/g, '\\\\');
+			const row = await DB实例.prepare("SELECT uuid FROM users WHERE attributes LIKE ? LIMIT 1")
+				.bind(`%\"account\":\"${escaped}\"%`).first();
+			if (row && 安全UUID有效(row.uuid)) return await 安全获取用户(运行时, row.uuid);
+		} catch(e) {}
+	}
+	return null;
+}
+
+// ── 速率限制（登录失败）──
+async function 安全检查登录速率限制(运行时, ip) {
+	if (!运行时?.env?.KV || !ip) return { blocked: false };
+	const key = 'sys:ratelimit:login:' + ip;
+	try {
+		const data = await 安全KV读取JSON(运行时.env, key, { failures: 0, firstAt: 0 });
+		const now = Date.now();
+		const windowMs = 15 * 60 * 1000;
+		if (now - data.firstAt > windowMs) {
+			return { blocked: false, failures: 0 };
+		}
+		if (data.failures >= 5) {
+			return { blocked: true, failures: data.failures, retryAfterMs: windowMs - (now - data.firstAt) };
+		}
+		return { blocked: false, failures: data.failures };
+	} catch(e) { return { blocked: false }; }
+}
+
+async function 安全记录登录失败(运行时, ip) {
+	if (!运行时?.env?.KV || !ip) return;
+	const key = 'sys:ratelimit:login:' + ip;
+	try {
+		const now = Date.now();
+		let failures = 1, firstAt = now;
+		const existing = await 安全KV读取JSON(运行时.env, key, null);
+		if (existing) {
+			const windowMs = 15 * 60 * 1000;
+			if (now - existing.firstAt > windowMs) {
+				failures = 1; firstAt = now;
+			} else {
+				failures = (existing.failures || 0) + 1;
+				firstAt = existing.firstAt || now;
+			}
+		}
+		const ttl = 15 * 60;
+		await 运行时.env.KV.put(key, JSON.stringify({ failures, firstAt }), { expirationTtl: ttl });
+	} catch(e) {}
+}
+
+// ── 安全提取用户展示信息（含 passwordSet）──
+function 安全提取用户展示信息V2(user) {
+	if (typeof user !== 'object' || !user) return { account: '', email: '', passwordSet: false };
+	const attributes = user.attributes && typeof user.attributes === 'object' ? user.attributes : {};
+	let account, email;
+	if (attributes.account) { account = attributes.account; email = attributes.email; }
+	else if (user.userKey) {
+		const parts = String(user.userKey).split(':');
+		if (parts.length >= 4) { account = parts[2] || ''; email = parts[3] || ''; }
+		else if (parts.length >= 3) { account = parts[2] || ''; }
+	}
+	if (!account && user.label) account = user.label;
+	if (!email && attributes.email) email = attributes.email;
+	return { account: account || '', email: email || '', passwordSet: !!user.passwordSet };
+}
+
+// ── 更新后的 AuthForm校验字段（密码支持）──
+function AuthForm校验字段V2(mode, fields) {
+	const normalizedMode = mode === 'signin' ? 'signin' : 'signup';
+	const account = String(fields?.account || '').trim();
+	const password = String(fields?.password || '').trim();
+	const email = String(fields?.email || '').trim();
+	const errors = {};
+	if (!account) errors.account = '用户名不能为空';
+	if (normalizedMode === 'signup') {
+		if (!password) errors.password = '密码不能为空';
+		else if (password.length < 8) errors.password = '密码至少需要8个字符';
+		else if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password))
+			errors.password = '密码需包含字母和数字';
+		if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+			errors.email = '邮箱格式不正确';
+	} else {
+		if (!password && !email) errors.password = '请输入密码或邮箱';
+		if (password && password.length < 8) errors.password = '密码至少需要8个字符';
+	}
+	return {
+		mode: normalizedMode,
+		account,
+		password,
+		email,
+		valid: Object.keys(errors).length === 0,
+		errors,
+		isNewAuth: !!password,
+		isOldAuth: !password && !!email,
+	};
+}
+
+// ── 保存用户时同时创建V2索引 ──
+async function 安全保存用户记录V2(运行时, user) {
+	const saveFn = typeof 安全保存用户记录 === 'function' ? 安全保存用户记录 : async function(r, u) {
+		if (!r?.env?.KV || !u?.uuid) return false;
+		const key = 安全用户前缀 + u.uuid;
+		await 安全KV写入JSON(r.env, key, u);
+		return true;
+	};
+	const result = await saveFn(运行时, user);
+	if (安全UUID有效(user?.uuid)) {
+		const v2Key = 安全生成注册用户键V2(user.label || (user.attributes?.account) || '');
+		if (v2Key) {
+			await 安全KV写入JSON(运行时.env, 安全用户索引键(v2Key), { uuid: user.uuid, label: user.label }, { expirationTtl: null });
+		}
+	}
+	return result;
+}
+
 export default {
 	StateStore,
 	async fetch(request, env, ctx) {
@@ -505,7 +659,7 @@ export default {
 		} else 反代IP = (request.cf.colo + '.PrOxYIp.CmLiUsSsS.nEt').toLowerCase();
 		const 访问IP = request.headers.get('X-Real-IP') || request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || request.headers.get('True-Client-IP') || request.headers.get('Fly-Client-IP') || request.headers.get('X-Appengine-Remote-Addr') || request.headers.get('X-Forwarded-For') || request.headers.get('X-Real-IP') || request.headers.get('X-Cluster-Client-IP') || request.cf?.clientTcpRtt || '未知IP';
 		const 是后台管理请求 = 访问路径 === 'admin' || 访问路径.startsWith('admin/');
-		const 是注册面板请求 = 访问路径 === 'register' || 访问路径 === 'register/' || 访问路径 === 'register/api' || 访问路径 === 'register/api/' || 访问路径 === 'register/login' || 访问路径 === 'register/login/';
+			const 是注册面板请求 = 访问路径 === 'register' || 访问路径 === 'register/' || 访问路径 === 'register/api' || 访问路径 === 'register/api/' || 访问路径 === 'register/login' || 访问路径 === 'register/login/' || 访问路径 === 'register/password' || 访问路径 === 'register/password/';
 		const 已登录后台管理员 = 是后台管理请求 && await 校验后台管理员已登录(request, UA, 加密秘钥, 管理员密码);
 		const 安全运行时 = await 创建安全运行时(env);
 		const 当前安全配置 = 安全运行时 ? await 读取安全配置(env, 安全运行时) : 安全标准化配置({}, env);
@@ -589,29 +743,51 @@ export default {
 					}, 403);
 				}
 				const payload = await 安全解析注册载荷(request);
-				const 校验结果 = AuthForm校验字段('signup', payload);
+				const 校验结果 = AuthForm校验字段V2('signup', payload);
 				if (!校验结果.valid) {
 					await 安全记录注册日志(运行时, 'validation_failed', null, 访问IP, UA, { errors: 校验结果.errors }, 安全当前时间(env));
-					return 认证JSON响应('AUTH_VALIDATION_ERROR', '请填写合法的用户名和邮箱。', { errors: 校验结果.errors }, 400);
+					return 认证JSON响应('AUTH_VALIDATION_ERROR', '请填写合法的用户名和密码。', { errors: 校验结果.errors }, 400);
 				}
-				const 已有用户 = await 安全根据注册信息获取用户(运行时, payload);
+				if (!校验结果.password || 校验结果.password.length < 8 || !/[a-zA-Z]/.test(校验结果.password) || !/[0-9]/.test(校验结果.password)) {
+					return 认证JSON响应('AUTH_PASSWORD_TOO_WEAK', '密码需要至少8位，包含字母和数字。', null, 400);
+				}
+				const 已有用户 = await 安全根据账号获取用户(运行时, 校验结果.account);
 				if (已有用户) {
-					await 安全记录注册日志(运行时, 'duplicate', 已有用户.uuid, 访问IP, UA, { account: 校验结果.account, email: 校验结果.email }, 安全当前时间(env));
+					if (!已有用户.passwordSet) {
+						已有用户.passwordHash = await 安全哈希密码(校验结果.password);
+						已有用户.passwordSet = 1;
+						已有用户.passwordUpdatedAt = 安全当前时间(env);
+						已有用户.updatedAt = 安全当前时间(env);
+						if (校验结果.email) 已有用户.email = 校验结果.email;
+						await 安全保存用户记录V2(运行时, 已有用户);
+						await 安全记录注册日志(运行时, 'password_set', 已有用户.uuid, 访问IP, UA, { account: 校验结果.account }, 安全当前时间(env));
+						return 认证JSON响应('AUTH_PASSWORD_SET', '密码设置成功！请使用用户名和密码登录。', {
+							account: 校验结果.account,
+							nextMode: 'signin',
+						}, 200);
+					}
+					await 安全记录注册日志(运行时, 'duplicate', 已有用户.uuid, 访问IP, UA, { account: 校验结果.account }, 安全当前时间(env));
 					return 认证JSON响应('AUTH_SIGNUP_EXISTS', '该用户已存在，已为你切换到登录模式。', {
 						account: 校验结果.account,
-						email: 校验结果.email,
 						nextMode: 'signin',
 					}, 200);
 				}
-				const user = await 安全创建用户(运行时, { ...payload, source: 'register-panel' }, 访问IP, UA, 安全当前时间(env));
-				await 安全记录注册日志(运行时, 'success', user.uuid, 访问IP, UA, { account: 校验结果.account, email: 校验结果.email }, 安全当前时间(env));
+				const hash = await 安全哈希密码(校验结果.password);
+				const newUserPayload = {
+					...payload,
+					source: 'register-panel',
+					passwordHash: hash,
+					passwordSet: 1,
+					passwordUpdatedAt: 安全当前时间(env),
+				};
+				if (校验结果.email) newUserPayload.email = 校验结果.email;
+				const user = await 安全创建用户(运行时, newUserPayload, 访问IP, UA, 安全当前时间(env));
+				await 安全保存用户记录V2(运行时, user);
+				await 安全记录注册日志(运行时, 'success', user.uuid, 访问IP, UA, { account: 校验结果.account }, 安全当前时间(env));
 				return 认证JSON响应('AUTH_SIGNUP_SUCCESS', '注册成功，已切换到登录模式，请直接登录。', {
 					account: 校验结果.account,
-					email: 校验结果.email,
 					nextMode: 'signin',
-					user: {
-						uuid: user.uuid,
-					},
+					user: { uuid: user.uuid },
 				}, 201);
 			} catch (error) {
 				console.error('[注册订阅] 接口处理失败:', error?.stack || error?.message || String(error));
@@ -622,41 +798,142 @@ export default {
 				return 认证JSON响应('AUTH_SIGNUP_FAILED', `注册失败：${错误消息}`, null, 500);
 			}
 		}
-		if (访问路径 === 'register/login' || 访问路径 === 'register/login/') {
+if (访问路径 === 'register/login' || 访问路径 === 'register/login/') {
 			try {
 				if (request.method !== 'POST') return 认证JSON响应('AUTH_METHOD_NOT_ALLOWED', '请求方式不支持', null, 405);
 				const 运行时 = await 创建安全运行时(env);
 				if (!运行时) return 认证JSON响应('AUTH_STORAGE_UNAVAILABLE', '登录存储未就绪，请先绑定 KV。', null, 503);
-				const payload = await 安全解析注册载荷(request);
-				const 校验结果 = AuthForm校验字段('signin', payload);
-				if (!校验结果.valid) {
-					return 认证JSON响应('AUTH_VALIDATION_ERROR', '请填写合法的用户名和邮箱。', { errors: 校验结果.errors }, 400);
+				const rateLimit = await 安全检查登录速率限制(运行时, 访问IP);
+				if (rateLimit.blocked) {
+					return 认证JSON响应('AUTH_RATE_LIMITED', '登录尝试次数过多，请等待15分钟后再试。', {
+						retryAfterMs: rateLimit.retryAfterMs,
+					}, 429);
 				}
-				const user = await 安全根据注册信息获取用户(运行时, payload);
+				const payload = await 安全解析注册载荷(request);
+				const 校验结果 = AuthForm校验字段V2('signin', payload);
+				if (!校验结果.valid) {
+					return 认证JSON响应('AUTH_VALIDATION_ERROR', 校验结果.isOldAuth ? '请填写合法的用户名和邮箱。' : '请填写合法的用户名和密码。', { errors: 校验结果.errors }, 400);
+				}
+				const 是密码登录 = 校验结果.isNewAuth;
+				let user;
+				if (是密码登录) {
+					user = await 安全根据账号获取用户(运行时, 校验结果.account);
+				} else {
+					user = await 安全根据注册信息获取用户(运行时, payload);
+				}
 				if (!user) {
+					await 安全记录登录失败(运行时, 访问IP);
 					return 认证JSON响应('AUTH_USER_NOT_FOUND', '未找到对应用户，请先完成注册。', { nextMode: 'signup' }, 404);
 				}
 				if (安全用户已封禁(user)) {
 					return 认证JSON响应('AUTH_USER_BANNED', '当前账号已被封禁，请联系管理员解封。', {
 						account: 校验结果.account,
-						email: 校验结果.email,
 						user: { uuid: user.uuid },
 						status: 'banned',
 					}, 403);
 				}
-				return 认证JSON响应('AUTH_SIGNIN_SUCCESS', '登录成功。', {
-					account: 校验结果.account,
-					email: 校验结果.email,
+				let 验证通过 = false;
+				if (是密码登录) {
+					if (user.passwordHash) {
+						验证通过 = await 安全验证密码(校验结果.password, user.passwordHash);
+					} else {
+						return 认证JSON响应('AUTH_PASSWORD_NOT_SET', '该账号尚未设置密码，请使用邮箱登录。', {
+							account: 校验结果.account,
+							email: user.email || '',
+						}, 200);
+					}
+				} else {
+					const emailDeadline = user.emailLoginDeadline || 0;
+					const now = 安全当前时间(env);
+					if (emailDeadline > 0 && now > emailDeadline) {
+						return 认证JSON响应('AUTH_EMAIL_LOGIN_EXPIRED', '邮箱登录功能已关闭，请联系管理员设置密码。', {
+							account: 校验结果.account,
+						}, 403);
+					}
+					const expectedKey = 安全生成注册用户唯一键(校验结果.account, 校验结果.email);
+					验证通过 = user.userKey === expectedKey;
+					if (!验证通过 && user.userKey && user.userKey.startsWith('register:')) {
+						const keyParts = user.userKey.split(':');
+						if (keyParts.length >= 4) {
+							验证通过 = (keyParts[2] === 安全标准化用户唯一键(校验结果.account))
+								&& (keyParts[3] === 安全标准化用户唯一键(校验结果.email));
+						}
+					}
+				}
+				if (!验证通过) {
+					await 安全记录登录失败(运行时, 访问IP);
+					return 认证JSON响应('AUTH_INVALID_CREDENTIALS', '用户名或密码/邮箱错误。', null, 401);
+				}
+				let migrationToken = null;
+				if (!user.passwordSet) {
+					migrationToken = 安全生成迁移令牌();
+					try {
+						await 运行时.env.KV.put('sys:migration:' + migrationToken, JSON.stringify({
+							uuid: user.uuid,
+							account: 校验结果.account,
+						}), { expirationTtl: 900 });
+					} catch(e) {}
+				}
+				const profile = 安全提取用户展示信息V2(user);
+				const responseData = {
+					account: profile.account || user.label || '',
+					email: profile.email || '',
+					passwordSet: !!user.passwordSet,
 					user,
 					checkin: 安全构建签到信息(user, 安全当前时间(env)),
 					node: await 安全构建节点订阅信息(url, user),
-				}, 200);
+				};
+				if (migrationToken) responseData.migrationToken = migrationToken;
+				return 认证JSON响应('AUTH_SIGNIN_SUCCESS', '登录成功。', responseData, 200);
 			} catch (error) {
 				console.error('[订阅登录] 接口处理失败:', error?.stack || error?.message || String(error));
 				return 认证JSON响应('AUTH_SIGNIN_FAILED', `登录失败：${error?.message || '服务器内部异常'}`, null, 500);
 			}
 		}
-		if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
+		if (访问路径 === 'register/password' || 访问路径 === 'register/password/') {
+			try {
+				if (request.method !== 'POST') return 认证JSON响应('AUTH_METHOD_NOT_ALLOWED', '请求方式不支持', null, 405);
+				const 运行时 = await 创建安全运行时(env);
+				if (!运行时) return 认证JSON响应('AUTH_STORAGE_UNAVAILABLE', '存储未就绪。', null, 503);
+				const payload = await 安全解析注册载荷(request);
+				const migrationToken = payload.migrationToken || '';
+				const password = payload.password || '';
+				if (!password) return 认证JSON响应('AUTH_VALIDATION_ERROR', '密码不能为空。', null, 400);
+				if (password.length < 8 || !/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
+					return 认证JSON响应('AUTH_PASSWORD_TOO_WEAK', '密码需要至少8位，包含字母和数字。', null, 400);
+				}
+				let user = null;
+				if (migrationToken) {
+					try {
+						const tokenData = await 安全KV读取JSON(运行时.env, 'sys:migration:' + migrationToken, null);
+						if (tokenData && 安全UUID有效(tokenData.uuid)) {
+							user = await 安全获取用户(运行时, tokenData.uuid);
+							try { await 运行时.env.KV.delete('sys:migration:' + migrationToken); } catch(e) {}
+						}
+					} catch(e) {}
+				}
+				if (!user && payload.uuid && payload.token) {
+					const 校验 = await 安全校验用户令牌请求(运行时, new URL(request.url), payload.uuid, payload.token);
+					if (校验.ok) user = 校验.user;
+				}
+				if (!user) {
+					return 认证JSON响应('AUTH_INVALID_CREDENTIALS', '迁移令牌无效或已过期。', null, 401);
+				}
+				user.passwordHash = await 安全哈希密码(password);
+				user.passwordSet = 1;
+				user.passwordUpdatedAt = 安全当前时间(env);
+				user.updatedAt = 安全当前时间(env);
+				await 安全保存用户记录V2(运行时, user);
+				return 认证JSON响应('AUTH_PASSWORD_SET', '密码设置成功！请使用新密码登录。', {
+					account: user.label || '',
+				}, 200);
+			} catch (error) {
+				console.error('[密码设置] 接口处理失败:', error?.stack || error?.message || String(error));
+				return 认证JSON响应('AUTH_SIGNIN_FAILED', `密码设置失败：${error?.message || '服务器内部异常'}`, null, 500);
+			}
+		}
+
+if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
 			try {
 				if (request.method !== 'GET') return 认证JSON响应('AUTH_METHOD_NOT_ALLOWED', '请求方式不支持', null, 405);
 				const 运行时 = await 创建安全运行时(env);
@@ -668,10 +945,11 @@ export default {
 					} : null, 校验结果.status);
 				}
 				const user = 校验结果.user;
-				const profile = 安全提取用户展示信息(user);
+				const profile = 安全提取用户展示信息V2(user);
 				return 认证JSON响应('AUTH_USER_INFO_SUCCESS', '获取成功。', {
 					account: profile.account || user.label || '',
 					email: profile.email || '',
+					passwordSet: !!user.passwordSet,
 					user,
 					checkin: 安全构建签到信息(user, 安全当前时间(env)),
 					node: await 安全构建节点订阅信息(url, user),
@@ -702,10 +980,11 @@ export default {
 						node: 签到结果.user ? await 安全构建节点订阅信息(url, 签到结果.user) : null,
 					}, 签到结果.status);
 				}
-				const profile = 安全提取用户展示信息(签到结果.user);
+				const profile = 安全提取用户展示信息V2(签到结果.user);
 				return 认证JSON响应('CHECKIN_SUCCESS', 签到结果.message, {
 					account: profile.account || 签到结果.user.label || '',
 					email: profile.email || '',
+					passwordSet: !!签到结果.user.passwordSet,
 					user: 签到结果.user,
 					checkin: 签到结果.checkin,
 					rewardGB: 签到结果.rewardGB,
@@ -721,17 +1000,18 @@ export default {
 			const cfg = 安全运行时 ? await 读取安全配置(env, 安全运行时) : 获取默认安全配置();
 			return new Response(JSON.stringify({
 				rulesFrequency: cfg.register?.rulesFrequency || 'always',
+					authMode: 'password',
 			}), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
 		}
 		if (访问路径 === 'api/stats' && request.method === 'GET') {
 			const stats = await 读取全局流量();
-			const daily = await 读取当天流量();
+				const daily = await 读取当天流量();
 			const online = await 读取在线人数();
 			return new Response(JSON.stringify({
 				累计上行: 格式化字节(stats.up),
 				累计下行: 格式化字节(stats.down),
-				本日上行: 格式化字节(daily.up),
-				本日下行: 格式化字节(daily.down),
+					本日上行: 格式化字节(daily.up),
+					本日下行: 格式化字节(daily.down),
 				在线人数: online,
 			}), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
 		}
@@ -747,7 +1027,7 @@ export default {
 			await 反代参数获取(url);
 			log(`[WebSocket] 命中请求: ${url.pathname}${url.search}`);
 			return await 处理WS请求(request, { 默认UUID: 当前节点UUID, 运行时: 安全运行时 }, url);
-		} else if (管理员密码 && !访问路径.startsWith('admin/') && 访问路径 !== 'login' && !访问路径.startsWith('register/api') && !访问路径.startsWith('register/login') && request.method === 'POST') {// gRPC/XHTTP代理
+		} else if (管理员密码 && !访问路径.startsWith('admin/') && 访问路径 !== 'login' && !访问路径.startsWith('register/api') && !访问路径.startsWith('register/login') && !访问路径.startsWith('register/password') && request.method === 'POST') {// gRPC/XHTTP代理
 			await 反代参数获取(url);
 			const referer = request.headers.get('Referer') || '';
 			const 命中XHTTP特征 = referer.includes('x_padding', 14) || referer.includes('x_padding=');
@@ -2096,7 +2376,7 @@ async function 处理WS请求(request, yourUUID, url) {
 
 	readable.pipeTo(new WritableStream({
 		async write(chunk) {
-				(async () => { try { await 累加全局流量(chunk.byteLength, 0); await 累加当天流量(chunk.byteLength, 0); } catch(e) {} })();
+				(async () => { try { await 累加全局流量(chunk.byteLength, 0); } catch(e) {} })();
 			当前流量UUID && 批量累加流量(当前流量UUID, chunk.byteLength); // upstream counting
 			if (isDnsQuery) return await forwardataudp(chunk, serverSock, null);
 			if (判断协议类型 === 'ss') {
@@ -2565,7 +2845,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, us
 				mainBuf = value.buffer;
 				const len = value.byteLength;
 				连接累计字节 += len;
-				(async () => { try { await 累加全局流量(0, len); await 累加当天流量(0, len); } catch(e) {} })();
+				(async () => { try { await 累加全局流量(0, len); } catch(e) {} })();
 				if (userUUID) 批量累加流量(userUUID, len);
 
 				if (value.byteOffset !== offset) {
@@ -6908,7 +7188,63 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 		return 安全JSON响应({ success: true, ...result });
 	}
 
-	if (pathname === '/admin/system/users/audit' && request.method === 'GET') {
+	if (pathname === '/admin/system/users/migrate-passwords' && request.method === 'POST') {
+		const payload = await request.json().catch(() => ({}));
+		const dryRun = !!payload.dryRun;
+		const batchSize = Math.min(payload.batchSize || 50, 100);
+		const daysDeadline = payload.daysDeadline || 30;
+		const nowMs = 安全当前时间(env);
+		const deadlineMs = nowMs + daysDeadline * 86400 * 1000;
+		let allUsers = [];
+		if (DB实例) {
+			try {
+				const rows = await DB实例.prepare(
+					"SELECT uuid, label, email, passwordSet, attributes FROM users WHERE passwordSet IS NULL OR passwordSet = 0 LIMIT ?"
+				).bind(batchSize).all();
+				if (rows.results) allUsers = rows.results;
+			} catch(e) {}
+		}
+		if (!allUsers.length) {
+			try {
+				const list = await 运行时.env.KV.list({ prefix: 安全用户前缀, limit: batchSize * 2 });
+				for (const key of list.keys) {
+					const uuid = key.name.replace(安全用户前缀, '');
+					if (!安全UUID有效(uuid)) continue;
+					const user = await 安全获取用户(运行时, uuid);
+					if (user && !user.passwordSet) {
+						allUsers.push({ uuid: user.uuid, label: user.label || '', email: user.email || user.attributes?.email || '', passwordSet: 0 });
+					}
+					if (allUsers.length >= batchSize) break;
+				}
+			} catch(e) {}
+		}
+		if (dryRun) {
+			return 安全JSON响应({ success: true, dryRun: true, total: allUsers.length,
+				users: allUsers.map(u => ({ uuid: u.uuid, label: u.label, email: u.email || '' })),
+			});
+		}
+		let migrated = 0;
+		const errors = [];
+		for (const userData of allUsers) {
+			try {
+				const user = await 安全获取用户(运行时, userData.uuid);
+				if (!user || user.passwordSet) continue;
+				user.emailLoginDeadline = deadlineMs;
+				user.updatedAt = nowMs;
+				if (!user.email && user.attributes?.email) user.email = user.attributes.email;
+				await 安全保存用户记录V2(运行时, user);
+				await 安全记录注册日志(运行时, 'migration_deadline_set', user.uuid, 访问IP, 'admin', { deadlineMs }, nowMs);
+				migrated++;
+			} catch(e) { errors.push({ uuid: userData.uuid, error: e.message }); }
+		}
+		return 安全JSON响应({ success: true, total: allUsers.length, migrated,
+			errors: errors.length ? errors : undefined,
+			deadlineMs, deadlineDate: new Date(deadlineMs).toISOString(),
+		});
+	}
+
+
+if (pathname === '/admin/system/users/audit' && request.method === 'GET') {
 		const uuid = String(url.searchParams.get('uuid') || '').trim().toLowerCase();
 		const events = await 安全列出KV记录(运行时.env, 安全事件前缀, Math.min(limit * 6, 120));
 		return 安全JSON响应({
