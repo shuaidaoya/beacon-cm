@@ -212,6 +212,45 @@ async function 读取全局流量() {
 	} catch(e) {}
 	return { up: 0, down: 0 };
 }
+
+async function 读取当天流量() {
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+        if (DB实例) {
+            const row = await DB实例.prepare('SELECT up_bytes, down_bytes FROM daily_traffic WHERE date=?').bind(today).first();
+            if (row) return { up: row.up_bytes || 0, down: row.down_bytes || 0 };
+        }
+    } catch(e) {}
+    try {
+        const text = await env_global?.KV?.get('sys:daily:traffic:' + today);
+        if (text) { const d = JSON.parse(text); return { up: d.up || 0, down: d.down || 0 }; }
+    } catch(e) {}
+    return { up: 0, down: 0 };
+}
+async function 累加当天流量(upBytes, downBytes) {
+    const today = new Date().toISOString().slice(0, 10);
+    if (DB实例) {
+        let ok = false;
+        try {
+            await DB实例.prepare('INSERT INTO daily_traffic (date, up_bytes, down_bytes) VALUES (?1, ?2, ?3) ON CONFLICT(date) DO UPDATE SET up_bytes=up_bytes+?2, down_bytes=down_bytes+?3').bind(today, upBytes||0, downBytes||0).run();
+            ok = true;
+        } catch(e) {
+            try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS daily_traffic (date TEXT PRIMARY KEY, up_bytes INTEGER DEFAULT 0, down_bytes INTEGER DEFAULT 0)').run(); } catch(e2) {}
+            if (!ok) {
+                try { await DB实例.prepare('INSERT INTO daily_traffic (date, up_bytes, down_bytes) VALUES (?1, ?2, ?3) ON CONFLICT(date) DO UPDATE SET up_bytes=up_bytes+?2, down_bytes=down_bytes+?3').bind(today, upBytes||0, downBytes||0).run(); } catch(e3) {}
+            }
+        }
+    }
+    try {
+        const kvKey = 'sys:daily:traffic:' + today;
+        const text = await env_global?.KV?.get(kvKey);
+        const current = text ? JSON.parse(text) : { up: 0, down: 0 };
+        current.up = (current.up || 0) + (upBytes || 0);
+        current.down = (current.down || 0) + (downBytes || 0);
+        await env_global?.KV?.put(kvKey, JSON.stringify(current));
+    } catch(e) {}
+}
+
 async function 累加全局流量(upBytes, downBytes) {
 	// D1 累加（建表后重试）
 	if (DB实例) {
@@ -221,6 +260,7 @@ async function 累加全局流量(upBytes, downBytes) {
 			ok = true;
 		} catch(e) {
 			try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS global_traffic (id INTEGER PRIMARY KEY, up_bytes INTEGER DEFAULT 0, down_bytes INTEGER DEFAULT 0)').run(); } catch(e2) {}
+				try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS daily_traffic (date TEXT PRIMARY KEY, up_bytes INTEGER DEFAULT 0, down_bytes INTEGER DEFAULT 0)').run(); } catch(e2) {}
 			if (!ok) {
 				try { await DB实例.prepare('INSERT OR REPLACE INTO global_traffic (id, up_bytes, down_bytes) VALUES (1, COALESCE((SELECT up_bytes FROM global_traffic WHERE id=1),0)+?1, COALESCE((SELECT down_bytes FROM global_traffic WHERE id=1),0)+?2)').bind(upBytes||0, downBytes||0).run(); } catch(e3) {}
 			}
@@ -683,10 +723,13 @@ export default {
 		}
 		if (访问路径 === 'api/stats' && request.method === 'GET') {
 			const stats = await 读取全局流量();
+			const daily = await 读取当天流量();
 			const online = await 读取在线人数();
 			return new Response(JSON.stringify({
 				累计上行: 格式化字节(stats.up),
 				累计下行: 格式化字节(stats.down),
+				当天上行: 格式化字节(daily.up),
+				当天下行: 格式化字节(daily.down),
 				在线人数: online,
 			}), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
 		}
@@ -2051,7 +2094,7 @@ async function 处理WS请求(request, yourUUID, url) {
 
 	readable.pipeTo(new WritableStream({
 		async write(chunk) {
-				(async () => { try { await 累加全局流量(chunk.byteLength, 0); } catch(e) {} })();
+				(async () => { try { await 累加全局流量(chunk.byteLength, 0); await 累加当天流量(chunk.byteLength, 0); } catch(e) {} })();
 			当前流量UUID && 批量累加流量(当前流量UUID, chunk.byteLength); // upstream counting
 			if (isDnsQuery) return await forwardataudp(chunk, serverSock, null);
 			if (判断协议类型 === 'ss') {
@@ -2520,7 +2563,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, us
 				mainBuf = value.buffer;
 				const len = value.byteLength;
 				连接累计字节 += len;
-				(async () => { try { await 累加全局流量(0, len); } catch(e) {} })();
+				(async () => { try { await 累加全局流量(0, len); await 累加当天流量(0, len); } catch(e) {} })();
 				if (userUUID) 批量累加流量(userUUID, len);
 
 				if (value.byteOffset !== offset) {
