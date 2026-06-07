@@ -519,10 +519,9 @@ async function 安全根据账号获取用户(运行时, account) {
 			}
 		} catch(e) {}
 		try {
-			const escaped = normalizedAccount.replace(/'/g, '''').replace(/\\/g, '\\\\');
+			const escaped = normalizedAccount.replace(/'/g, "\'").replace(/\/g, "\\\\");
 			const row = await DB实例.prepare("SELECT uuid FROM users WHERE attributes LIKE ? LIMIT 1")
-				.bind(`%\"account\":\"${escaped}\"%`).first();
-			if (row && 安全UUID有效(row.uuid)) return await 安全获取用户(运行时, row.uuid);
+				.bind(`%"account":"${escaped}"%`).first();
 		} catch(e) {}
 	}
 	return null;
