@@ -355,7 +355,7 @@ function 用户记录转D1行(user) {
 	return {
 		uuid: user.uuid || '',
 		userKey: user.userKey || null,
-		label: user.label || null,
+		label: user.label || (user.attributes?.account) || null,
 		source: user.source || null,
 		status: user.subscriptionState === 'banned' ? 'banned' : (user.status || 'active'),
 		createdAt: user.createdAt || null,
@@ -519,6 +519,12 @@ async function 安全根据账号获取用户(运行时, account) {
 			}
 		} catch(e) {}
 		try {
+			const likeKey = `%register:%:${normalizedAccount}%`;
+			const row = await DB实例.prepare('SELECT uuid FROM users WHERE userKey LIKE ? LIMIT 1')
+				.bind(likeKey).first();
+			if (row && 安全UUID有效(row.uuid)) return await 安全获取用户(运行时, row.uuid);
+		} catch(e) {}
+		try {
 			const row = await DB实例.prepare("SELECT uuid FROM users WHERE attributes LIKE ? LIMIT 1")
 				.bind(`%${normalizedAccount}%`).first();
 			if (row && 安全UUID有效(row.uuid)) return await 安全获取用户(运行时, row.uuid);
@@ -623,9 +629,14 @@ async function 安全保存用户记录V2(运行时, user) {
 	};
 	const result = await saveFn(运行时, user);
 	if (安全UUID有效(user?.uuid)) {
-		const v2Key = 安全生成注册用户键V2(user.label || (user.attributes?.account) || '');
+		let _accountForV2 = user.label || (user.attributes?.account) || '';
+		if (!_accountForV2 && user.userKey) {
+			const _parts = String(user.userKey).split(':');
+			if (_parts.length >= 4) _accountForV2 = _parts[2] || '';
+		}
+		const v2Key = 安全生成注册用户键V2(_accountForV2);
 		if (v2Key) {
-			await 安全KV写入JSON(运行时.env, 安全用户索引键(v2Key), { uuid: user.uuid, label: user.label }, { expirationTtl: null });
+			await 安全KV写入JSON(运行时.env, 安全用户索引键(v2Key), { uuid: user.uuid, label: user.label || (user.attributes?.account) || "" }, { expirationTtl: null });
 		}
 	}
 	return result;
@@ -774,6 +785,7 @@ export default {
 				const hash = await 安全哈希密码(校验结果.password);
 				const newUserPayload = {
 					...payload,
+					label: 校验结果.account,
 					source: 'register-panel',
 					passwordHash: hash,
 					passwordSet: 1,
@@ -5975,7 +5987,7 @@ async function 安全创建用户(运行时, payload = {}, 访问IP, UA, nowMs) 
 				nowMs,
 				ip: 访问IP,
 				userAgent: UA,
-				label: payload.label || null,
+				label: payload.label || payload.account || null,
 				source: payload.source || 'admin',
 				attributes: payload.attributes || {},
 				userKey,
@@ -5991,7 +6003,7 @@ async function 安全创建用户(运行时, payload = {}, 访问IP, UA, nowMs) 
 		nowMs,
 		ip: 访问IP,
 		userAgent: UA,
-		label: payload.label || null,
+		label: payload.label || payload.account || null,
 		source: payload.source || 'admin',
 		attributes: payload.attributes || {},
 		userKey,
