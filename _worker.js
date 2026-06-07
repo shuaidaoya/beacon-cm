@@ -5455,6 +5455,11 @@ async function 安全KV读取JSON(env, key, 默认值 = null) {
 					traffic: row.traffic || 0,
 					used_traffic: row.used_traffic || 0,
 					expiry: row.expiry || 0,
+					passwordHash: row.passwordHash || null,
+					passwordSet: row.passwordSet ? 1 : 0,
+					email: row.email || null,
+					passwordUpdatedAt: row.passwordUpdatedAt || 0,
+					emailLoginDeadline: row.emailLoginDeadline || 0,
 					attributes: (() => { try { return JSON.parse(row.attributes||'{}'); } catch { return {}; } })(),
 				};
 				内存缓存设置(kvCacheKey, user);
@@ -5488,9 +5493,9 @@ async function 安全KV写入JSON(env, key, value, expirationTtl) {
 	if (DB实例 && key.startsWith(安全用户前缀) && value && typeof value === 'object') {
 		try {
 			const row = 用户记录转D1行(value);
-			await DB实例.prepare(`INSERT OR REPLACE INTO users (uuid,userKey,label,source,status,createdAt,updatedAt,lastSeenAt,bannedAt,bannedReason,subscriptionToken,subscriptionTokenUpdatedAt,subscriptionState,traffic,used_traffic,expiry,attributes)
-				VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)`)
-				.bind(row.uuid, row.userKey, row.label, row.source, row.status, row.createdAt, row.updatedAt, row.lastSeenAt, row.bannedAt, row.bannedReason, row.subscriptionToken, row.subscriptionTokenUpdatedAt, row.subscriptionState, row.traffic, row.used_traffic, row.expiry, row.attributes)
+			await DB实例.prepare(`INSERT OR REPLACE INTO users (uuid,userKey,label,source,status,createdAt,updatedAt,lastSeenAt,bannedAt,bannedReason,subscriptionToken,subscriptionTokenUpdatedAt,subscriptionState,traffic,used_traffic,expiry,passwordHash,passwordSet,email,passwordUpdatedAt,emailLoginDeadline,attributes)
+				VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)`)
+				.bind(row.uuid, row.userKey, row.label, row.source, row.status, row.createdAt, row.updatedAt, row.lastSeenAt, row.bannedAt, row.bannedReason, row.subscriptionToken, row.subscriptionTokenUpdatedAt, row.subscriptionState, row.traffic, row.used_traffic, row.expiry, row.passwordHash, row.passwordSet, row.email, row.passwordUpdatedAt, row.emailLoginDeadline, row.attributes)
 				.run();
 		} catch(e) { /* D1 失败 → 回退 KV */ }
 	}
@@ -5944,6 +5949,10 @@ async function 安全确保用户存在(运行时, uuid, 元数据 = {}) {
 	if (元数据.label) user.label = 元数据.label;
 	if (userKey) user.userKey = userKey;
 	if (元数据.attributes && typeof 元数据.attributes === 'object') user.attributes = { ...(user.attributes || {}), ...元数据.attributes };
+		if (元数据.passwordHash && !user.passwordHash) user.passwordHash = 元数据.passwordHash;
+		if (元数据.passwordSet != null && !user.passwordSet) user.passwordSet = 元数据.passwordSet;
+		if (元数据.passwordUpdatedAt && !user.passwordUpdatedAt) user.passwordUpdatedAt = 元数据.passwordUpdatedAt;
+		if (元数据.email && !user.email) user.email = 元数据.email;
 	if (!existing && !user.subscriptionToken) {
 		user.subscriptionToken = 安全生成订阅访问令牌();
 		user.subscriptionTokenUpdatedAt = nowMs;
@@ -5970,6 +5979,10 @@ async function 安全创建用户(运行时, payload = {}, 访问IP, UA, nowMs) 
 				source: payload.source || 'admin',
 				attributes: payload.attributes || {},
 				userKey,
+					passwordHash: payload.passwordHash || null,
+					passwordSet: payload.passwordSet != null ? payload.passwordSet : null,
+					passwordUpdatedAt: payload.passwordUpdatedAt || null,
+					email: payload.email || null,
 			});
 		}
 	}
@@ -5982,6 +5995,10 @@ async function 安全创建用户(运行时, payload = {}, 访问IP, UA, nowMs) 
 		source: payload.source || 'admin',
 		attributes: payload.attributes || {},
 		userKey,
+				passwordHash: payload.passwordHash || null,
+				passwordSet: payload.passwordSet != null ? payload.passwordSet : null,
+				passwordUpdatedAt: payload.passwordUpdatedAt || null,
+				email: payload.email || null,
 	});
 	await 安全记录事件(运行时, {
 		eventType: 'user.registered',
