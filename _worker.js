@@ -520,7 +520,8 @@ async function 安全根据账号获取用户(运行时, account) {
 		} catch(e) {}
 		try {
 			const row = await DB实例.prepare("SELECT uuid FROM users WHERE attributes LIKE ? LIMIT 1")
-				.bind('%' || ? || '%', normalizedAccount).first();
+				.bind(`%${normalizedAccount}%`).first();
+			if (row && 安全UUID有效(row.uuid)) return await 安全获取用户(运行时, row.uuid);
 		} catch(e) {}
 	}
 	return null;
