@@ -7614,6 +7614,7 @@ function 安全提取用户展示信息智能(user = {}) {
 
 async function 安全构建用户管理信息(运行时, url, user, nowMs, config = null) {
 	const profile = 安全提取用户展示信息智能(user);
+	const activeBan = await 安全获取活跃封禁(运行时, 'uuid', user.uuid, nowMs);
 	const subscriptionMonitor = await 安全获取订阅状态(运行时, user.uuid, nowMs);
 	const effectiveConfig = config || await 读取安全配置(运行时.env, 运行时);
 	const subscriptionRisk = 安全构建订阅风险信息(subscriptionMonitor, effectiveConfig, nowMs);
