@@ -1178,24 +1178,13 @@ if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
 			if (isUuid) {
 				user = await 安全获取用户(运行时, identifier);
 			} else if (isEmail) {
-				// 邮箱查找：D1 优先（email 字段 + attributes JSON），KV 回退
+				// 邮箱查找：D1 多字段联合查询 + KV 回退
 				const 搜索邮箱 = identifier.toLowerCase();
 				if (DB实例 && !user) {
 					try {
-						// 先按原始大小写匹配，再按小写匹配
-						const row = await DB实例.prepare('SELECT uuid FROM users WHERE email=? LIMIT 1')
-							.bind(identifier).first();
-						if (!row) {
-							const row2 = await DB实例.prepare('SELECT uuid FROM users WHERE email=? LIMIT 1')
-								.bind(搜索邮箱).first();
-							if (row2 && 安全UUID有效(row2.uuid)) user = await 安全获取用户(运行时, row2.uuid);
-						} else if (安全UUID有效(row.uuid)) user = await 安全获取用户(运行时, row.uuid);
-					} catch(e) {}
-				}
-				if (DB实例 && !user) {
-					try {
-						const row = await DB实例.prepare("SELECT uuid FROM users WHERE attributes LIKE ? LIMIT 1")
-							.bind(`%${搜索邮箱}%`).first();
+						const row = await DB实例.prepare(
+							`SELECT uuid FROM users WHERE email=? OR email=? OR userKey LIKE ? OR attributes LIKE ? LIMIT 1`
+						).bind(identifier, 搜索邮箱, `%:${搜索邮箱}%`, `%${搜索邮箱}%`).first();
 						if (row && 安全UUID有效(row.uuid)) user = await 安全获取用户(运行时, row.uuid);
 					} catch(e) {}
 				}
