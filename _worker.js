@@ -1180,7 +1180,8 @@ if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
 			const token = 安全生成迁移令牌();
 			const tokenData = { uuid: user.uuid, createdAt: 安全当前时间(env), used: false };
 			await 安全KV写入JSON(运行时.env, 'sys:reset-token:' + token, tokenData, { expirationTtl: 3600 });
-			const maskedEmail = (user.email || (user.attributes && user.attributes.email) || '').replace(/(.{1,2}).*(@.*)/, '$1***$2') || '关联邮箱';
+			const rawEmail = user.email || (user.attributes && user.attributes.email) || '';
+		const maskedEmail = rawEmail ? rawEmail.replace(/(.{1,2}).*(@.*)/, '$1***$2') : '未绑定邮箱';
 			await 安全记录注册日志(运行时, 'forgot_password_request', user.uuid, 访问IP, UA, { identifier }, 安全当前时间(env));
 			return 认证JSON响应('FORGOT_PASSWORD_SUCCESS', '验证通过。请使用令牌完成密码重置。', {
 				token: token,
