@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿const Version = '2026-04-10 06:03:17';
+﻿﻿﻿﻿﻿﻿﻿const Version = '2026-04-10 06:03:17';
 let connect;
 try {
 	({ connect } = await import('cloudflare:sockets'));
@@ -623,6 +623,7 @@ function 安全提取用户展示信息V2(user) {
 	}
 	if (!account && user.label) account = user.label;
 	if (!email && attributes.email) email = attributes.email;
+	if (!email && user.email) email = user.email;
 	return { account: account || '', email: email || '', passwordSet: !!user.passwordSet };
 }
 
@@ -3689,7 +3690,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, panelI
 		if (typeof u.userKey === 'string' && u.userKey.startsWith('register:')) {
 			return u.userKey.split(':')[2] || '?';
 		}
-		return u.label || (u.uuid || '').slice(0, 8) || '-';
+		return u.label || u.email || (u.uuid || '').slice(0, 8) || '-';
 	};
 
 	const 掩码UUID = (uuid) => 安全掩码UUID(uuid);
@@ -6056,6 +6057,9 @@ async function 安全确保用户存在(运行时, uuid, 元数据 = {}) {
 		if (元数据.passwordSet != null && !user.passwordSet) user.passwordSet = 元数据.passwordSet;
 		if (元数据.passwordUpdatedAt && !user.passwordUpdatedAt) user.passwordUpdatedAt = 元数据.passwordUpdatedAt;
 		if (元数据.email && !user.email) user.email = 元数据.email;
+		if (元数据.email && user.email !== 元数据.email) {
+			console.error(`[数据异常] 用户 ${uuid} email 写入冲突: 元数据=${元数据.email}, 已有值=${user.email}`);
+		}
 	if (!existing && !user.subscriptionToken) {
 		user.subscriptionToken = 安全生成订阅访问令牌();
 		user.subscriptionTokenUpdatedAt = nowMs;
@@ -6297,7 +6301,7 @@ async function 安全设置用户订阅状态(运行时, uuid, enabled, meta = {
 		},
 		createdAt: nowMs,
 	});
-	const account = (saved.attributes && (saved.attributes.account || saved.attributes.email)) || saved.label || '-';
+	const account = (saved.attributes && (saved.attributes.account || saved.attributes.email)) || saved.label || saved.email || '-';
 	const eventType = enabled ? 'user.restored' : 'user.banned';
 	const title = enabled ? `#管理员解封 ${account}` : `#管理员封禁 ${account}`;
 	安全发送TG通知(运行时.env, eventType, title, [
@@ -6330,7 +6334,7 @@ async function 安全封禁用户账号(运行时, uuid, meta = {}, nowMs = Date
 		},
 		createdAt: nowMs,
 	});
-	const account = (saved.attributes && (saved.attributes.account || saved.attributes.email)) || saved.label || '-';
+	const account = (saved.attributes && (saved.attributes.account || saved.attributes.email)) || saved.label || saved.email || '-';
 	安全发送TG通知(运行时.env, 'user.banned', `#自动封禁 ${account}`, [
 		['账号', account],
 		['UUID', 安全掩码UUID(saved.uuid)],
@@ -7459,6 +7463,51 @@ if (pathname === '/admin/system/users/audit' && request.method === 'GET') {
 		}
 	}
 
+	if (pathname === '/admin/system/users/repair-profiles' && request.method === 'POST') {
+		const payload = await request.json().catch(() => ({}));
+		const dryRun = !!payload.dryRun;
+		const batchSize = Math.min(payload.batchSize || 50, 200);
+		const nowMs = 安全当前时间(env);
+		let repaired = 0, skipped = 0, errors = [];
+		const allUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, batchSize);
+		for (const user of allUsers) {
+			try {
+				if (!user || !安全UUID有效(user.uuid)) { skipped++; continue; }
+				let changed = false;
+				// 从 attributes 回填顶层 email
+				if (!user.email && user.attributes?.email) {
+					user.email = user.attributes.email;
+					changed = true;
+				}
+				// 从 attributes 回填顶层 label（用 account / username）
+				if (!user.label && user.attributes) {
+					const altLabel = user.attributes.account || user.attributes.username || null;
+					if (altLabel) { user.label = altLabel; changed = true; }
+				}
+				// 从 userKey 解析并回填 label / email
+				if (typeof user.userKey === 'string' && user.userKey.startsWith('register:')) {
+					const parts = user.userKey.split(':');
+					if (!user.label && parts[2]) { user.label = parts[2]; changed = true; }
+					if (!user.email && parts[3]) { user.email = parts[3]; changed = true; }
+				}
+				// 确保 attributes 中有关键字段
+				if (!user.attributes) user.attributes = {};
+				if (!user.attributes.account && user.label) { user.attributes.account = user.label; changed = true; }
+				if (!user.attributes.email && user.email) { user.attributes.email = user.email; changed = true; }
+				if (changed) {
+					if (!dryRun) {
+						user.updatedAt = nowMs;
+						await 安全保存用户记录(运行时, user, nowMs);
+					}
+					repaired++;
+				} else {
+					skipped++;
+				}
+			} catch(e) { errors.push({ uuid: user?.uuid || 'unknown', error: e.message }); }
+		}
+		return 安全JSON响应({ success: true, dryRun, total: allUsers.length, repaired, skipped, errors: errors.length ? errors : undefined });
+	}
+
 	return 安全JSON响应({ success: false, error: '未找到对应管理接口' }, 404);
 }
 
@@ -7488,8 +7537,8 @@ function 安全构建订阅风险信息(state, config, nowMs) {
 
 function 安全提取用户展示信息(user = {}) {
 	const attributes = user && typeof user.attributes === 'object' && user.attributes ? user.attributes : {};
-	let account = attributes.account || attributes.username || null;
-	let email = attributes.email || null;
+	let account = attributes.account || attributes.username || user.label || null;
+	let email = attributes.email || user.email || null;
 	if ((!account || !email) && typeof user.userKey === 'string' && user.userKey.startsWith('register:')) {
 		const parts = user.userKey.split(':');
 		if (!account) account = parts[2] || null;
