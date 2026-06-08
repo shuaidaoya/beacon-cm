@@ -1149,7 +1149,93 @@ if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
 				return 认证JSON响应('CHECKIN_FAILED', `签到失败：${error?.message || '服务器内部异常'}`, null, 500);
 			}
 		}
-		if (访问路径 === 'register/config' && request.method === 'GET') {
+		if (访问路径 === 'register/forgot-password' || 访问路径 === 'register/forgot-password/') {
+		try {
+			if (request.method !== 'POST') return 认证JSON响应('AUTH_METHOD_NOT_ALLOWED', '请求方式不支持', null, 405);
+			const 运行时 = await 创建安全运行时(env);
+			if (!运行时) return 认证JSON响应('AUTH_STORAGE_UNAVAILABLE', '存储未就绪。', null, 503);
+			const payload = await 安全解析注册载荷(request);
+			const identifier = String(payload.identifier || '').trim();
+			const uuidRegexV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+			const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier);
+			const isUuid = uuidRegexV4.test(identifier);
+			if (!identifier) return 认证JSON响应('AUTH_VALIDATION_ERROR', '请输入邮箱地址或 UUID。', null, 400);
+			if (isEmail && isUuid) return 认证JSON响应('AUTH_VALIDATION_ERROR', '请仅提供邮箱或 UUID 其中一项。', null, 400);
+			if (!isEmail && !isUuid) return 认证JSON响应('AUTH_VALIDATION_ERROR', '身份标识格式不正确，请输入合法的邮箱地址或 UUID。', null, 400);
+			const rateLimit = await 安全检查登录速率限制(运行时, 访问IP);
+			if (rateLimit.blocked) return 认证JSON响应('AUTH_RATE_LIMITED', '操作过于频繁，请15分钟后再试。', { retryAfterMs: rateLimit.retryAfterMs }, 429);
+			let user = null;
+			if (isUuid) {
+				user = await 安全获取用户(运行时, identifier);
+			} else {
+				const allUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, 500);
+				for (const u of allUsers) {
+					if (u && (u.email === identifier || (u.attributes && u.attributes.email === identifier))) {
+						user = u;
+						break;
+					}
+				}
+			}
+			if (!user) return 认证JSON响应('AUTH_USER_NOT_FOUND', '未找到与该身份标识关联的用户。', null, 404);
+			const token = 安全生成迁移令牌();
+			const tokenData = { uuid: user.uuid, createdAt: 安全当前时间(env), used: false };
+			await 安全KV写入JSON(运行时.env, 'sys:reset-token:' + token, tokenData, { expirationTtl: 3600 });
+			const maskedEmail = (user.email || (user.attributes && user.attributes.email) || '').replace(/(.{1,2}).*(@.*)/, '$1***$2') || '关联邮箱';
+			await 安全记录注册日志(运行时, 'forgot_password_request', user.uuid, 访问IP, UA, { identifier }, 安全当前时间(env));
+			return 认证JSON响应('FORGOT_PASSWORD_SUCCESS', '验证通过。请使用令牌完成密码重置。', {
+				token: token,
+				uuid: user.uuid,
+				account: user.label || '',
+				emailHint: maskedEmail,
+				expiresIn: 3600,
+			}, 200);
+		} catch (error) {
+			console.error('[忘记密码] 接口处理失败:', error?.stack || error?.message || String(error));
+			return 认证JSON响应('AUTH_SIGNIN_FAILED', '操作失败：' + (error?.message || '服务器内部异常'), null, 500);
+		}
+	}
+	if (访问路径 === 'register/reset-password' || 访问路径 === 'register/reset-password/') {
+		try {
+			if (request.method !== 'POST') return 认证JSON响应('AUTH_METHOD_NOT_ALLOWED', '请求方式不支持', null, 405);
+			const 运行时 = await 创建安全运行时(env);
+			if (!运行时) return 认证JSON响应('AUTH_STORAGE_UNAVAILABLE', '存储未就绪。', null, 503);
+			const payload = await 安全解析注册载荷(request);
+			const token = String(payload.token || '').trim();
+			const newPassword = String(payload.newPassword || '').trim();
+			const confirmPassword = String(payload.confirmPassword || '').trim();
+			if (!token) return 认证JSON响应('AUTH_VALIDATION_ERROR', '重置令牌不能为空。', null, 400);
+			if (!newPassword) return 认证JSON响应('AUTH_VALIDATION_ERROR', '新密码不能为空。', null, 400);
+			if (newPassword.length < 8 || newPassword.length > 20) return 认证JSON响应('AUTH_PASSWORD_TOO_WEAK', '密码长度需为8-20位。', null, 400);
+			if (!/[a-zA-Z]/.test(newPassword) || !/[0-9]/.test(newPassword) || !/[^a-zA-Z0-9]/.test(newPassword)) {
+				return 认证JSON响应('AUTH_PASSWORD_TOO_WEAK', '密码需要包含字母、数字及特殊字符。', null, 400);
+			}
+			if (newPassword !== confirmPassword) return 认证JSON响应('AUTH_VALIDATION_ERROR', '两次输入的新密码不一致。', null, 400);
+			const rateLimit = await 安全检查登录速率限制(运行时, 访问IP);
+			if (rateLimit.blocked) return 认证JSON响应('AUTH_RATE_LIMITED', '操作过于频繁，请15分钟后再试。', { retryAfterMs: rateLimit.retryAfterMs }, 429);
+			const tokenData = await 安全KV读取JSON(运行时.env, 'sys:reset-token:' + token, null);
+			if (!tokenData) return 认证JSON响应('AUTH_INVALID_CREDENTIALS', '重置令牌无效或已过期。', null, 401);
+			if (tokenData.used) return 认证JSON响应('AUTH_INVALID_CREDENTIALS', '该重置令牌已被使用。', null, 401);
+			const user = await 安全获取用户(运行时, tokenData.uuid);
+			if (!user) return 认证JSON响应('AUTH_USER_NOT_FOUND', '未找到关联用户。', null, 404);
+			tokenData.used = true;
+			await 安全KV写入JSON(运行时.env, 'sys:reset-token:' + token, tokenData, { expirationTtl: 3600 });
+			user.passwordHash = await 安全哈希密码(newPassword);
+			user.passwordSet = 1;
+			user.passwordUpdatedAt = 安全当前时间(env);
+			user.updatedAt = 安全当前时间(env);
+			await 安全保存用户记录V2(运行时, user);
+			await 安全记录注册日志(运行时, 'password_reset', user.uuid, 访问IP, UA, { via: 'forgot-password' }, 安全当前时间(env));
+			console.log('[操作日志] 用户通过忘记密码流程重置密码:', user.label, 'IP:', 访问IP);
+			return 认证JSON响应('PASSWORD_RESET_SUCCESS', '密码重置成功！请使用新密码登录。', {
+				account: user.label || '',
+				uuid: user.uuid,
+			}, 200);
+		} catch (error) {
+			console.error('[重置密码] 接口处理失败:', error?.stack || error?.message || String(error));
+			return 认证JSON响应('AUTH_SIGNIN_FAILED', '重置密码失败：' + (error?.message || '服务器内部异常'), null, 500);
+		}
+	}
+	if (访问路径 === 'register/config' && request.method === 'GET') {
 			const cfg = 安全运行时 ? await 读取安全配置(env, 安全运行时) : 获取默认安全配置();
 			return new Response(JSON.stringify({
 				rulesFrequency: cfg.register?.rulesFrequency || 'always',
