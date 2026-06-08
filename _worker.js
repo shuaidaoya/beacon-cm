@@ -6547,7 +6547,7 @@ async function 安全列出KV记录(env, prefix, limit = 50) {
 	// D1 优先（用户列表）
 	if (DB实例 && prefix === 安全用户前缀) {
 		try {
-			const safeLimit = Math.min(Math.max(1, limit), 200);
+			const safeLimit = Math.min(Math.max(1, limit), 5000);
 			const result = await DB实例.prepare('SELECT * FROM users ORDER BY lastSeenAt DESC LIMIT ?').bind(safeLimit).all();
 			const users = (result.results||[]).map(row => ({
 				uuid: row.uuid, userKey: row.userKey, label: row.label, source: row.source,
@@ -6606,7 +6606,7 @@ async function 安全分页列出KV(env, prefix, limit = 50, cursor = null) {
 	// D1 优先（用户分页）
 	if (DB实例 && prefix === 安全用户前缀) {
 		try {
-			const safeLimit = Math.min(Math.max(1, limit), 200);
+			const safeLimit = Math.min(Math.max(1, limit), 5000);
 			const offset = cursor ? parseInt(cursor) : 0;
 			const result = await DB实例.prepare('SELECT * FROM users ORDER BY lastSeenAt DESC LIMIT ? OFFSET ?').bind(safeLimit, offset).all();
 			const users = (result.results||[]).map(row => ({
@@ -7265,9 +7265,9 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 
 		let rawUsers, nextCursor, hasMore;
 		if (hasFilters) {
-			rawUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, 200);
-			nextCursor = null;
-			hasMore = false;
+				rawUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, 5000);
+				nextCursor = null;
+				hasMore = false;
 		} else if (pageCursor) {
 			const page = await 安全分页列出KV(运行时.env, 安全用户前缀, pageSize, pageCursor);
 			rawUsers = page.values;
