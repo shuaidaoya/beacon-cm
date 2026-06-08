@@ -805,7 +805,7 @@ export default {
 				const 校验结果 = AuthForm校验字段V2('signup', payload);
 				if (!校验结果.valid) {
 					await 安全记录注册日志(运行时, 'validation_failed', null, 访问IP, UA, { errors: 校验结果.errors }, 安全当前时间(env));
-					return 认证JSON响应('AUTH_VALIDATION_ERROR', '请填写合法的用户名和密码。', { errors: 校验结果.errors }, 400);
+					return 认证JSON响应('AUTH_VALIDATION_ERROR', '请填写合法的用户名、邮箱和密码。', { errors: 校验结果.errors }, 400);
 				}
 				if (!校验结果.password || 校验结果.password.length < 8 || !/[a-zA-Z]/.test(校验结果.password) || !/[0-9]/.test(校验结果.password)) {
 					return 认证JSON响应('AUTH_PASSWORD_TOO_WEAK', '密码需要至少8位，包含字母和数字。', null, 400);
