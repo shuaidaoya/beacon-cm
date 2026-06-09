@@ -9870,24 +9870,6 @@ function 生成安全管理后台注入代码() {
       '</form><div class="admin-plus-actions" style="margin-top:20px;border-top:1px solid var(--ap-border);padding-top:20px"><button class="admin-plus-btn secondary" id="admin-plus-reset-defaults" type="button">重置为推荐值</button><button class="admin-plus-btn" id="admin-plus-save-config" type="button">应用并保存配置</button></div></div>';
   }
 
-  function renderTG() {
-    const tgState = state.tgState || {};
-    return '<div class="admin-plus-panel" style="margin-top:0"><h3>消息通知设置</h3>' +
-      '<div class="admin-plus-desc" style="margin-bottom:16px">设置 Telegram Bot 后，封禁/解封等安全事件将自动通知到你的 TG 群组，并可发送 /banned、/unban 等命令管理用户。</div>' +
-      '<form id="admin-plus-tg-form" class="admin-plus-form">' +
-        field('tg_bot_token', 'Bot Token', tgState.botToken, 'text') +
-        field('tg_chat_id', 'Chat ID', tgState.chatId, 'text') +
-        field('tg_security_notify', '安全事件通知', tgState.securityNotifyEnabled ? 'true' : 'false', 'select', [{label:'开启通知',value:'true'},{label:'关闭通知',value:'false'}]) +
-      '</form>' +
-      '<div class="admin-plus-actions" style="margin-top:16px">' +
-        '<button class="admin-plus-btn secondary" id="admin-plus-tg-test" type="button" style="font-size:12px">发送测试消息</button>' +
-        '<button class="admin-plus-btn secondary" id="admin-plus-tg-webhook" type="button" style="font-size:12px">注册 Webhook</button>' +
-        '<button class="admin-plus-btn" id="admin-plus-tg-save" type="button">保存 TG 设置</button>' +
-      '</div>' +
-      '<div class="admin-plus-empty" style="padding:12px 16px;text-align:left;font-size:12px" id="admin-plus-tg-status"></div>' +
-      '</div>';
-  }
-
   function field(name, label, value, type, options) {
     if(type === 'select') {
       return '<div class="admin-plus-field"><label>' + escapeHtml(label) + '</label><select name="' + escapeHtml(name) + '">' +
@@ -9979,7 +9961,7 @@ function 生成安全管理后台注入代码() {
     if (!viewEl) return;
     if (state.tab === 'overview') viewEl.innerHTML = renderOverview();
     if (state.tab === 'users') viewEl.innerHTML = renderUsers();
-    if (state.tab === 'config') { viewEl.innerHTML = renderConfig() + renderTG(); }
+    if (state.tab === 'config') viewEl.innerHTML = renderConfig();
     if (state.tab === 'registration') viewEl.innerHTML = renderRegistration();
     bindViewEvents();
   }
@@ -10213,73 +10195,6 @@ function 生成安全管理后台注入代码() {
         await loadTab('registration', true);
       } catch (error) { setStatus('取消失败: ' + error.message); }
     });
-    const tgSaveBtn = document.getElementById('admin-plus-tg-save');
-    const tgTestBtn = document.getElementById('admin-plus-tg-test');
-    const tgWebhookBtn = document.getElementById('admin-plus-tg-webhook');
-    const tgStatusEl = document.getElementById('admin-plus-tg-status');
-    if (tgSaveBtn) tgSaveBtn.onclick = async () => {
-      try {
-        const botToken = document.querySelector('[name="tg_bot_token"]')?.value?.trim() || '';
-        const chatId = document.querySelector('[name="tg_chat_id"]')?.value?.trim() || '';
-        const notifyEnabled = document.querySelector('[name="tg_security_notify"]')?.value === 'true';
-        const body = { BotToken: botToken, ChatID: chatId, PanelID: 'A', securityNotifyEnabled: notifyEnabled };
-        await api('/admin/system/tg-config', { method: 'POST', body: JSON.stringify(body) });
-        state.tgState = { botToken: botToken, chatId: chatId, securityNotifyEnabled: notifyEnabled };
-        if (tgStatusEl) tgStatusEl.innerHTML = 'TG 设置已保存';
-        setStatus('TG 设置已保存');
-      } catch (error) {
-        if (tgStatusEl) tgStatusEl.innerHTML = '保存失败: ' + escapeHtml(error.message);
-        setStatus('TG 保存失败: ' + error.message);
-      }
-    };
-    if (tgTestBtn) tgTestBtn.onclick = async () => {
-      try {
-        const botToken = document.querySelector('[name="tg_bot_token"]')?.value?.trim() || '';
-        const chatId = document.querySelector('[name="tg_chat_id"]')?.value?.trim() || '';
-        if (!botToken || !chatId) { if (tgStatusEl) tgStatusEl.innerHTML = '请先填写 Bot Token 和 Chat ID'; return; }
-        const testMsg = '<b>🧪 测试消息</b>\\n\\nTG Bot 安全管理通知配置成功！\\n\\n发送 <b>/bchelp</b> 查看可用命令。';
-        const resp = await fetch('https://api.telegram.org/bot' + botToken + '/sendMessage?' + new URLSearchParams({ chat_id: chatId, parse_mode: 'HTML', text: testMsg }).toString());
-        const result = await resp.json();
-        if (result.ok) {
-          if (tgStatusEl) tgStatusEl.innerHTML = '测试消息发送成功！请检查 TG 群组。';
-          setStatus('TG 测试消息已发送');
-        } else {
-          if (tgStatusEl) tgStatusEl.innerHTML = '发送失败: ' + escapeHtml(result.description || '未知错误');
-        }
-      } catch (error) {
-        if (tgStatusEl) tgStatusEl.innerHTML = '测试失败: ' + escapeHtml(error.message);
-      }
-    };
-    if (tgWebhookBtn) tgWebhookBtn.onclick = async () => {
-      try {
-        const botToken = document.querySelector('[name="tg_bot_token"]')?.value?.trim() || '';
-        if (!botToken) { if (tgStatusEl) tgStatusEl.innerHTML = '请先填写 Bot Token'; return; }
-        const webhookUrl = window.location.origin + '/tg-webhook';
-        const resp = await fetch('https://api.telegram.org/bot' + botToken + '/setWebhook?url=' + encodeURIComponent(webhookUrl));
-        const result = await resp.json();
-        const cmds = { commands: [
-          { command: 'bchelp', description: '显示可用命令' },
-          { command: 'bcbanned', description: '列出被封禁用户' },
-          { command: 'bcbaninfo', description: '查封禁详情' },
-          { command: 'bcunban', description: '解封用户' }
-        ]};
-        const cmdResp = await fetch('https://api.telegram.org/bot' + botToken + '/setMyCommands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cmds) });
-        await fetch('https://api.telegram.org/bot' + botToken + '/deleteMyCommands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: { type: 'all_group_chats' } }) });
-        const cmdResult = await cmdResp.json();
-        const parts = [];
-        if (!result.ok) parts.push('Webhook: ' + (result.description || '失败'));
-        if (!cmdResult.ok) parts.push('命令: ' + (cmdResult.description || '失败'));
-        if (!parts.length) {
-          if (tgStatusEl) tgStatusEl.innerHTML = 'Webhook + 命令已注册 ✓';
-          setStatus('TG 就绪');
-        } else {
-          if (tgStatusEl) tgStatusEl.innerHTML = parts.join(' | ');
-        }
-      } catch (error) {
-        if (tgStatusEl) tgStatusEl.innerHTML = 'Webhook 注册失败: ' + escapeHtml(error.message);
-      }
-    };
-  }
   loadTab('overview', false);
   } catch(e) {
     var el = document.querySelector('.admin-plus-layout');
