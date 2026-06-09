@@ -1208,13 +1208,20 @@ if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
 			const token = 安全生成迁移令牌();
 			const tokenData = { uuid: user.uuid, createdAt: 安全当前时间(env), used: false };
 			await 安全KV写入JSON(运行时.env, 'sys:reset-token:' + token, tokenData, { expirationTtl: 3600 });
-			const rawEmail = user.email || (user.attributes && user.attributes.email) || (user.attributes && user.attributes.username) || '';
-		const maskedEmail = (rawEmail && /@/.test(rawEmail)) ? rawEmail.replace(/(.{1,2}).*(@.*)/, '$1***$2') : '未绑定邮箱';
+			// 从 userKey 提取账号和邮箱做兜底（userKey 格式: register:hash:account:email）
+			let userKeyAccount = '', userKeyEmail = '';
+			if (user.userKey && user.userKey.startsWith('register:')) {
+				const parts = user.userKey.split(':');
+				if (parts.length >= 4) { userKeyAccount = parts[2] || ''; userKeyEmail = parts[3] || ''; }
+				else if (parts.length >= 3) { userKeyAccount = parts[2] || ''; }
+			}
+			const rawEmail = user.email || (user.attributes && user.attributes.email) || userKeyEmail || (user.attributes && user.attributes.username) || '';
+		const maskedEmail = (rawEmail && /@/.test(rawEmail)) ? rawEmail.replace(/(.{1,2}).*(@.*)/, '$1***$2') : (userKeyEmail && /@/.test(userKeyEmail) ? userKeyEmail.replace(/(.{1,2}).*(@.*)/, '$1***$2') : '未绑定邮箱');
 			await 安全记录注册日志(运行时, 'forgot_password_request', user.uuid, 访问IP, UA, { identifier }, 安全当前时间(env));
 			return 认证JSON响应('FORGOT_PASSWORD_SUCCESS', '验证通过。请使用令牌完成密码重置。', {
 				token: token,
 				uuid: user.uuid,
-				account: user.label || '',
+				account: user.label || (user.attributes && user.attributes.account) || userKeyAccount || '',
 				emailHint: maskedEmail,
 				expiresIn: 3600,
 			}, 200);
