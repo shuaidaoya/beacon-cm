@@ -9149,7 +9149,7 @@ function 生成安全管理后台注入代码() {
   const shell = document.getElementById('admin-plus-shell');
   if (!shell) { document.querySelector('.admin-plus-layout') && (document.querySelector('.admin-plus-layout').innerHTML = '<div class="admin-plus-panel"><div class="admin-plus-empty">Shell element not found.</div></div>'); return; }
   const layoutEl = shell.querySelector('.admin-plus-layout');
-  const state = { tab: 'overview', overview: null, users: null, usersSummary: null, userSearch: '', userStatusFilter: 'all', selectedUserUuid: null, selectedUserUuids: [], userAudit: [], config: null, registration: null, usersCursor: null, usersHasMore: false, theme: 'spacex', tgState: { botToken: '', chatId: '', panelId: 'A', securityNotifyEnabled: false } };
+  const state = { tab: 'overview', overview: null, users: null, usersSummary: null, userSearch: '', userStatusFilter: 'all', selectedUserUuid: null, selectedUserUuids: [], userAudit: [], config: null, registration: null, usersCursor: null, usersHasMore: false, theme: 'spacex', tgState: { botToken: '', chatId: '', securityNotifyEnabled: false } };
   const cacheTime = {};
   const cacheTTL = { overview: 8000, users: 15000, config: 20000, registration: 10000 };
 
@@ -9476,7 +9476,7 @@ function 生成安全管理后台注入代码() {
         state.config = (await api('/admin/system/config.json')).config || (await api('/admin/system/config.json'));
       }
       if (tab === 'config') {
-        try { const tg = await api('/admin/system/tg-config'); state.tgState = { botToken: tg.botToken || '', chatId: tg.chatId || '', panelId: tg.panelId || 'A', securityNotifyEnabled: !!tg.securityNotifyEnabled }; } catch(e) {}
+        try { const tg = await api('/admin/system/tg-config'); state.tgState = { botToken: tg.botToken || '', chatId: tg.chatId || '', securityNotifyEnabled: !!tg.securityNotifyEnabled }; } catch(e) {}
       }
       if (tab === 'registration') state.registration = await api('/admin/system/registration');
       cacheTime[tab] = Date.now();
@@ -9877,7 +9877,6 @@ function 生成安全管理后台注入代码() {
       '<form id="admin-plus-tg-form" class="admin-plus-form">' +
         field('tg_bot_token', 'Bot Token', tgState.botToken, 'text') +
         field('tg_chat_id', 'Chat ID', tgState.chatId, 'text') +
-        field('tg_panel', '当前面板', tgState.panelId === 'B' ? 'B' : 'A', 'select', [{label:'面板A',value:'A'},{label:'面板B',value:'B'}]) +
         field('tg_security_notify', '安全事件通知', tgState.securityNotifyEnabled ? 'true' : 'false', 'select', [{label:'开启通知',value:'true'},{label:'关闭通知',value:'false'}]) +
       '</form>' +
       '<div class="admin-plus-actions" style="margin-top:16px">' +
@@ -10222,11 +10221,10 @@ function 生成安全管理后台注入代码() {
       try {
         const botToken = document.querySelector('[name="tg_bot_token"]')?.value?.trim() || '';
         const chatId = document.querySelector('[name="tg_chat_id"]')?.value?.trim() || '';
-        const panelId = document.querySelector('[name="tg_panel"]')?.value || 'A';
         const notifyEnabled = document.querySelector('[name="tg_security_notify"]')?.value === 'true';
-        const body = { BotToken: botToken, ChatID: chatId, PanelID: panelId, securityNotifyEnabled: notifyEnabled };
+        const body = { BotToken: botToken, ChatID: chatId, PanelID: 'A', securityNotifyEnabled: notifyEnabled };
         await api('/admin/system/tg-config', { method: 'POST', body: JSON.stringify(body) });
-        state.tgState = { botToken: botToken, chatId: chatId, panelId: panelId, securityNotifyEnabled: notifyEnabled };
+        state.tgState = { botToken: botToken, chatId: chatId, securityNotifyEnabled: notifyEnabled };
         if (tgStatusEl) tgStatusEl.innerHTML = 'TG 设置已保存';
         setStatus('TG 设置已保存');
       } catch (error) {
@@ -10259,13 +10257,11 @@ function 生成安全管理后台注入代码() {
         const webhookUrl = window.location.origin + '/tg-webhook';
         const resp = await fetch('https://api.telegram.org/bot' + botToken + '/setWebhook?url=' + encodeURIComponent(webhookUrl));
         const result = await resp.json();
-        const curPanelId = document.querySelector('[name="tg_panel"]')?.value || 'A';
-        const isB = curPanelId === 'B';
         const cmds = { commands: [
-          { command: isB ? 'bchelp2' : 'bchelp', description: '显示可用命令' },
-          { command: isB ? 'bcbanned2' : 'bcbanned', description: '列出被封禁用户' },
-          { command: isB ? 'bcbaninfo2' : 'bcbaninfo', description: '查封禁详情' },
-          { command: isB ? 'bcunban2' : 'bcunban', description: '解封用户' }
+          { command: 'bchelp', description: '显示可用命令' },
+          { command: 'bcbanned', description: '列出被封禁用户' },
+          { command: 'bcbaninfo', description: '查封禁详情' },
+          { command: 'bcunban', description: '解封用户' }
         ]};
         const cmdResp = await fetch('https://api.telegram.org/bot' + botToken + '/setMyCommands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cmds) });
         await fetch('https://api.telegram.org/bot' + botToken + '/deleteMyCommands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: { type: 'all_group_chats' } }) });
