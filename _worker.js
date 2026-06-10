@@ -765,6 +765,12 @@ export default {
 				let replyToChatId = null, replyToken = null;
 				try {
 					const body = await request.json();
+					// ── 处理聊天成员更新（退群/被踢/加入）──
+					const chatMemberUpdate = body.chat_member || body.my_chat_member;
+					if (chatMemberUpdate) {
+						await 安全处理聊天成员更新(env, body);
+						return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+					}
 					const msg = body.message || body.edited_message;
 					if (!msg || !msg.text || !msg.chat) {
 						return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -2128,6 +2134,18 @@ if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
 			return 反代响应;
 		} catch (error) { }
 		return new Response(await nginx(), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
+	},
+	async scheduled(controller, env, ctx) {
+		try {
+			const 安全运行时 = await 创建安全运行时(env);
+			const config = await 读取安全配置(env, 安全运行时);
+			if (!config?.tgSecurityNotifications?.syncEnabled) return;
+			console.log('[TG Cron] 开始定时同步群成员...');
+			const result = await 安全同步TG群成员(安全运行时, env);
+			console.log('[TG Cron] 同步完成');
+		} catch (e) {
+			console.error('[TG Cron] 同步失败:', e?.message || e);
+		}
 	}
 };
 ///////////////////////////////////////////////////////////////////////XHTTP传输数据///////////////////////////////////////////////
@@ -4255,7 +4273,8 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 			'<b>/bchelp</b> — 显示此帮助\n' +
 			'<b>/bcbanned</b> — 列出所有被封禁用户\n' +
 			'<b>/bcbaninfo</b> <code>&lt;用户名&gt;</code> — 查封禁详情\n' +
-			'<b>/bcunban</b> <code>&lt;用户名&gt;</code> — 解封用户\n\n' +
+			'<b>/bcunban</b> <code>&lt;用户名&gt;</code> — 解封用户\n' +
+			'<b>/bcsync</b> — 同步群成员并封禁退群用户（仅管理员）\n\n' +
 			'提示：群内有多个机器人时，用 <code>@机器人用户名</code> 指定目标。';
 	}
 
@@ -4377,6 +4396,10 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 			return `<b>✅ 临时封禁已解除</b>\n\n👤 账号：<code>${account}</code>\n⏰ 时间：${new Date(nowMs).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })}`;
 		}
 		return '⚠️ 该用户当前未被封禁';
+	}
+
+	if (匹配命令('bcsync')) {
+		return await 安全同步TG群成员(运行时, env);
 	}
 
 	return /^\//.test(cmd) ? '<b>❓ 未知命令</b>\n\n输入 <b>/bchelp</b> 查看可用命令列表。' : '';
@@ -5631,6 +5654,7 @@ function 获取默认安全配置() {
 			enabled: false,
 			verifyRequired: true,
 			verifyTimeout: 600,
+			syncEnabled: false,
 		},
 	};
 }
@@ -5725,6 +5749,7 @@ function 安全标准化配置(原始配置 = {}, env = {}) {
 	if ('SECURITY_TG_NOTIFY_ENABLED' in env) merged.tgSecurityNotifications.enabled = 安全布尔值(env.SECURITY_TG_NOTIFY_ENABLED, merged.tgSecurityNotifications.enabled);
 	if ('SECURITY_TG_VERIFY_REQUIRED' in env) merged.tgSecurityNotifications.verifyRequired = 安全布尔值(env.SECURITY_TG_VERIFY_REQUIRED, merged.tgSecurityNotifications.verifyRequired);
 	if ('SECURITY_TG_VERIFY_TIMEOUT' in env) merged.tgSecurityNotifications.verifyTimeout = 安全数值(env.SECURITY_TG_VERIFY_TIMEOUT, merged.tgSecurityNotifications.verifyTimeout, 60, 3600);
+	if ('SECURITY_TG_SYNC_ENABLED' in env) merged.tgSecurityNotifications.syncEnabled = 安全布尔值(env.SECURITY_TG_SYNC_ENABLED, merged.tgSecurityNotifications.syncEnabled);
 	merged.enabled = 安全布尔值(merged.enabled, false);
 	merged.abuse.payload.enabled = 安全布尔值(merged.abuse.payload.enabled, true);
 	merged.abuse.userAgent.enabled = 安全布尔值(merged.abuse.userAgent.enabled, true);
@@ -6269,6 +6294,167 @@ async function 安全记录TG绑定日志(运行时, eventType, uuid, tgUserId, 
 	};
 	await 安全KV写入JSON(运行时.env, 安全TG绑定日志键(nowMs, logId), record, 7 * 24 * 3600);
 	return record;
+}
+
+// ── TG 聊天成员更新处理 ──
+async function 安全处理聊天成员更新(env, body) {
+	const TG_TXT = await env.KV.get('tg.json');
+	if (!TG_TXT) return;
+	const TG = JSON.parse(TG_TXT);
+	if (!TG.BotToken) return;
+	const configuredChatId = String(TG.ChatID || '');
+	const verifyGroupId = TG.VerifyGroupID || TG.ChatID;
+
+	const chatMember = body.chat_member || body.my_chat_member;
+	if (!chatMember) return;
+
+	const chat = chatMember.chat;
+	const from = chatMember.from;
+	const oldMember = chatMember.old_chat_member;
+	const newMember = chatMember.new_chat_member;
+
+	if (!chat || !newMember || !newMember.user) return;
+
+	// 仅处理已配置的群组
+	const chatId = String(chat.id);
+	const isConfiguredGroup = (configuredChatId && configuredChatId === chatId) || (verifyGroupId && String(verifyGroupId) === chatId);
+	if (!isConfiguredGroup) return;
+
+	const tgUserId = newMember.user.id;
+	const newStatus = newMember.status || '';
+	const oldStatus = oldMember ? (oldMember.status || '') : '';
+	const tgUsername = newMember.user.username ? '@' + newMember.user.username : String(tgUserId);
+
+	const 运行时 = await 创建安全运行时(env);
+
+	// 成员加入群组
+	if (newStatus === 'member' || newStatus === 'administrator' || newStatus === 'creator') {
+		// 检查是否有被封禁的绑定用户（被退群封禁后又重新加入）
+		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgUserId), null);
+		if (bindRecord && bindRecord.uuid) {
+			await 安全记录TG绑定日志(运行时, 'tg.member.joined', bindRecord.uuid, tgUserId, tgUsername, { newStatus, oldStatus });
+			// 可选：自动解封重新入群的用户（慎用，默认不开启）
+		}
+		return;
+	}
+
+	// 成员离开或被踢
+	if (newStatus === 'left' || newStatus === 'kicked') {
+		const kickedBy = chatMember.from && chatMember.from.id !== tgUserId ? chatMember.from.id : null;
+		// 检查是否有绑定的用户
+		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgUserId), null);
+		if (!bindRecord || !bindRecord.uuid) return;
+
+		const user = await 安全获取用户(运行时, bindRecord.uuid);
+		if (!user) return;
+
+		// 检查安全配置是否启用退群自动封禁
+		const config = await 读取安全配置(env, 运行时);
+		const syncEnabled = config?.tgSecurityNotifications?.syncEnabled === true;
+		if (!syncEnabled) {
+			await 安全记录TG绑定日志(运行时, 'tg.member.left.not_banned', bindRecord.uuid, tgUserId, tgUsername, { newStatus, reason: 'sync_disabled' });
+			return;
+		}
+
+		// 防止重复封禁
+		if (安全用户已封禁(user)) {
+			await 安全记录TG绑定日志(运行时, 'tg.member.left.already_banned', bindRecord.uuid, tgUserId, tgUsername, { newStatus });
+			return;
+		}
+
+		const banReason = newStatus === 'kicked' ? 'tg-group-kicked' : 'tg-group-left';
+		const nowMs = Date.now();
+		const saved = await 安全设置用户订阅状态(运行时, bindRecord.uuid, false, {
+			reason: banReason,
+			source: 'telegram-webhook',
+			ip: 'tg-webhook',
+			trigger: 'chat_member ' + newStatus + (kickedBy ? ' by ' + kickedBy : ''),
+		}, nowMs);
+
+		if (saved) {
+			await 安全记录TG绑定日志(运行时, 'tg.member.left.banned', bindRecord.uuid, tgUserId, tgUsername, { newStatus, banReason });
+			const account = (saved.attributes && saved.attributes.account) || saved.label || saved.email || bindRecord.account || '-';
+			const actionLabel = newStatus === 'kicked' ? '被踢出群组' : '退群';
+			安全发送TG通知(运行时.env, 'user.banned', `#${actionLabel}自动封禁 ${account}`, [
+				['账号', account],
+				['UUID', 安全掩码UUID(saved.uuid)],
+				['TG用户', tgUsername],
+				['原因', newStatus === 'kicked' ? '被管理员踢出群组' : '自行退出群组'],
+				['来源', 'telegram-chat-member-webhook'],
+			]);
+		}
+	}
+}
+
+// ── TG 群成员同步 ──
+async function 安全同步TG群成员(运行时, env) {
+	if (!运行时 || !运行时.env) return '⚠️ 系统暂不可用';
+	const TG_TXT = await env.KV.get('tg.json');
+	if (!TG_TXT) return '⚠️ TG 配置未找到，请先在管理面板配置 TG Bot。';
+	const TG = JSON.parse(TG_TXT);
+	if (!TG.BotToken) return '⚠️ Bot Token 未配置。';
+	const groupId = TG.VerifyGroupID || TG.ChatID;
+	if (!groupId) return '⚠️ 群组 ID 未配置。';
+
+	let checked = 0, banned = 0, skipped = 0, errors = 0;
+	const nowMs = Date.now();
+
+	// 扫描所有 TG 绑定记录
+	const bindRecords = await 安全列出KV记录(运行时.env, 安全TG绑定前缀, 5000);
+	if (!bindRecords || bindRecords.length === 0) return '📋 没有找到已绑定 TG 的用户。';
+
+	const config = await 读取安全配置(env, 运行时);
+
+	for (const record of bindRecords) {
+		if (!record || !record.uuid || !record.tgUserId) continue;
+		checked++;
+		try {
+			const memberResult = await 安全校验群组成员(运行时, TG.BotToken, groupId, record.tgUserId);
+			if (!memberResult.member) {
+				// 不在群中，需要封禁
+				const user = await 安全获取用户(运行时, record.uuid);
+				if (!user) { skipped++; continue; }
+				if (安全用户已封禁(user)) { skipped++; continue; }
+
+				const saved = await 安全设置用户订阅状态(运行时, record.uuid, false, {
+					reason: 'tg-group-sync-left',
+					source: 'telegram-sync',
+					ip: 'tg-sync',
+				}, nowMs);
+				if (saved) {
+					banned++;
+					await 安全记录TG绑定日志(运行时, 'tg.sync.banned', record.uuid, record.tgUserId, record.tgUsername, { groupId });
+				}
+			} else {
+				skipped++;
+			}
+		} catch (e) {
+			errors++;
+			console.error('[TG Sync] 检查成员失败:', record.tgUserId, e?.message);
+		}
+	}
+
+	const resultMsg = [
+		'<b>📋 TG 群成员同步完成</b>',
+		'',
+		`🔍 检查：<b>${checked}</b> 人`,
+		`✅ 仍在群：<b>${skipped}</b> 人`,
+		banned > 0 ? `🚫 已封禁：<b>${banned}</b> 人` : '',
+		errors > 0 ? `⚠️ 错误：<b>${errors}</b> 次` : '',
+		'',
+		`⏰ ${new Date(nowMs).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })}`,
+	].filter(Boolean).join('\n');
+
+	if (banned > 0) {
+		安全发送TG通知(运行时.env, 'user.banned', '#定时同步批量封禁', [
+			['检查', String(checked)],
+			['封禁', String(banned)],
+			['跳过', String(skipped)],
+			['错误', String(errors)],
+		]);
+	}
+
+	return resultMsg;
 }
 
 function 安全用户索引键(userKey) {
@@ -8177,6 +8363,7 @@ if (pathname === '/admin/system/users/audit' && request.method === 'GET') {
 				chatId: TG_JSON.ChatID || '',
 				panelId: TG_JSON.PanelID || 'A',
 				securityNotifyEnabled: 当前配置.tgSecurityNotifications?.enabled || false,
+				syncEnabled: 当前配置.tgSecurityNotifications?.syncEnabled || false,
 			});
 		} catch (e) {
 			return 安全JSON响应({ botToken: '', chatId: '', panelId: 'A', securityNotifyEnabled: false });
@@ -8193,13 +8380,18 @@ if (pathname === '/admin/system/users/audit' && request.method === 'GET') {
 			if (body.PanelID !== undefined) tgData.PanelID = String(body.PanelID) || 'A';
 			await env.KV.put('tg.json', JSON.stringify(tgData, null, 2));
 			let notifyEnabled = 当前配置.tgSecurityNotifications?.enabled || false;
-			if (typeof body.securityNotifyEnabled === 'boolean') {
+			let syncEnabled = 当前配置.tgSecurityNotifications?.syncEnabled || false;
+			if (typeof body.securityNotifyEnabled === 'boolean' || typeof body.syncEnabled === 'boolean') {
+				const patch = {};
+				if (typeof body.securityNotifyEnabled === 'boolean') patch.enabled = body.securityNotifyEnabled;
+				if (typeof body.syncEnabled === 'boolean') patch.syncEnabled = body.syncEnabled;
 				const updated = await 保存安全配置(env, 运行时, 安全深合并(当前配置, {
-					tgSecurityNotifications: { enabled: body.securityNotifyEnabled }
+					tgSecurityNotifications: patch
 				}));
 				notifyEnabled = updated.tgSecurityNotifications?.enabled || false;
+				syncEnabled = updated.tgSecurityNotifications?.syncEnabled || false;
 			}
-			return 安全JSON响应({ success: true, message: 'TG 设置已保存', securityNotifyEnabled: notifyEnabled });
+			return 安全JSON响应({ success: true, message: 'TG 设置已保存', securityNotifyEnabled: notifyEnabled, syncEnabled });
 		} catch (error) {
 			return 安全JSON响应({ success: false, error: '保存 TG 设置失败: ' + error.message }, 500);
 		}
@@ -9803,7 +9995,7 @@ function 生成安全管理后台注入代码() {
   const shell = document.getElementById('admin-plus-shell');
   if (!shell) { document.querySelector('.admin-plus-layout') && (document.querySelector('.admin-plus-layout').innerHTML = '<div class="admin-plus-panel"><div class="admin-plus-empty">Shell element not found.</div></div>'); return; }
   const layoutEl = shell.querySelector('.admin-plus-layout');
-  const state = { tab: 'overview', overview: null, users: null, usersSummary: null, userSearch: '', userStatusFilter: 'all', selectedUserUuid: null, selectedUserUuids: [], userAudit: [], config: null, registration: null, usersCursor: null, usersHasMore: false, theme: 'spacex', tgState: { botToken: '', chatId: '', securityNotifyEnabled: false } };
+  const state = { tab: 'overview', overview: null, users: null, usersSummary: null, userSearch: '', userStatusFilter: 'all', selectedUserUuid: null, selectedUserUuids: [], userAudit: [], config: null, registration: null, usersCursor: null, usersHasMore: false, theme: 'spacex', tgState: { botToken: '', chatId: '', securityNotifyEnabled: false, syncEnabled: false } };
   const cacheTime = {};
   const cacheTTL = { overview: 8000, users: 15000, config: 20000, registration: 10000 };
 
@@ -10130,7 +10322,7 @@ function 生成安全管理后台注入代码() {
         state.config = (await api('/admin/system/config.json')).config || (await api('/admin/system/config.json'));
       }
       if (tab === 'config') {
-        try { const tg = await api('/admin/system/tg-config'); state.tgState = { botToken: tg.botToken || '', chatId: tg.chatId || '', securityNotifyEnabled: !!tg.securityNotifyEnabled }; } catch(e) {}
+        try { const tg = await api('/admin/system/tg-config'); state.tgState = { botToken: tg.botToken || '', chatId: tg.chatId || '', securityNotifyEnabled: !!tg.securityNotifyEnabled, syncEnabled: !!tg.syncEnabled }; } catch(e) {}
       }
       if (tab === 'registration') state.registration = await api('/admin/system/registration');
       cacheTime[tab] = Date.now();
@@ -10524,7 +10716,22 @@ function 生成安全管理后台注入代码() {
         [{v:'0.5',l:'0.5 小时'},{v:'1',l:'1 小时'},{v:'2',l:'2 小时'},{v:'4',l:'4 小时'},{v:'8',l:'8 小时'},{v:'12',l:'12 小时'},{v:'24',l:'24 小时'}]
           .map(o => '<option value="' + o.v + '">' + o.l + '</option>').join('') +
       '</select></div>' +
-      '</form><div class="admin-plus-actions" style="margin-top:20px;border-top:1px solid var(--ap-border);padding-top:20px"><button class="admin-plus-btn secondary" id="admin-plus-reset-defaults" type="button">重置为推荐值</button><button class="admin-plus-btn" id="admin-plus-save-config" type="button">应用并保存配置</button></div></div>';
+      '</form><div class="admin-plus-actions" style="margin-top:20px;border-top:1px solid var(--ap-border);padding-top:20px"><button class="admin-plus-btn secondary" id="admin-plus-reset-defaults" type="button">重置为推荐值</button><button class="admin-plus-btn" id="admin-plus-save-config" type="button">应用并保存配置</button></div></div>' +
+      '<div class="admin-plus-panel" style="margin-top:20px"><h3>TG Bot 通知设置</h3>' +
+      '<div class="admin-plus-desc" style="margin-bottom:16px">设置 Telegram Bot 后，封禁/解封等安全事件将自动通知到你的 TG 群组，并可发送 /bcbanned、/bcunban、/bcsync 等命令管理用户。</div>' +
+      '<form id="admin-plus-tg-form" class="admin-plus-form">' +
+        field('tg_bot_token', 'Bot Token', state.tgState.botToken, 'text') +
+        field('tg_chat_id', 'Chat ID', state.tgState.chatId, 'text') +
+        field('tg_security_notify', '安全事件通知', state.tgState.securityNotifyEnabled ? 'true' : 'false', 'select', [{label:'开启通知',value:'true'},{label:'关闭通知',value:'false'}]) +
+        field('tg_sync_enabled', '退群自动封禁', state.tgState.syncEnabled ? 'true' : 'false', 'select', [{label:'启用自动封禁',value:'true'},{label:'关闭自动封禁',value:'false'}]) +
+      '</form>' +
+      '<div class="admin-plus-actions" style="margin-top:16px">' +
+        '<button class="admin-plus-btn secondary" id="admin-plus-tg-test" type="button" style="font-size:12px">发送测试消息</button>' +
+        '<button class="admin-plus-btn secondary" id="admin-plus-tg-webhook" type="button" style="font-size:12px">注册 Webhook</button>' +
+        '<button class="admin-plus-btn" id="admin-plus-tg-save" type="button">保存 TG 设置</button>' +
+      '</div>' +
+      '<div class="admin-plus-status" id="admin-plus-tg-status" style="margin-top:12px;font-size:12px;color:var(--ap-text-muted)"></div>' +
+      '</div>';
   }
 
   function field(name, label, value, type, options) {
@@ -10852,6 +11059,75 @@ function 生成安全管理后台注入代码() {
         await loadTab('registration', true);
       } catch (error) { setStatus('取消失败: ' + error.message); }
     });
+    // ── TG Bot 设置按钮事件 ──
+    const tgSaveBtn = document.getElementById('admin-plus-tg-save');
+    if (tgSaveBtn) tgSaveBtn.onclick = async () => {
+      try {
+        const botToken = document.querySelector('[name="tg_bot_token"]')?.value?.trim() || '';
+        const chatId = document.querySelector('[name="tg_chat_id"]')?.value?.trim() || '';
+        const notifyEnabled = document.querySelector('[name="tg_security_notify"]')?.value === 'true';
+        const syncEnabled = document.querySelector('[name="tg_sync_enabled"]')?.value === 'true';
+        const body = { BotToken: botToken, ChatID: chatId, securityNotifyEnabled: notifyEnabled, syncEnabled: syncEnabled };
+        await api('/admin/system/tg-config', { method: 'POST', body: JSON.stringify(body) });
+        state.tgState = { botToken: botToken, chatId: chatId, securityNotifyEnabled: notifyEnabled, syncEnabled: syncEnabled };
+        const tgStatusEl = document.getElementById('admin-plus-tg-status');
+        if (tgStatusEl) tgStatusEl.innerHTML = 'TG 设置已保存';
+        setStatus('TG 设置已保存');
+      } catch (error) {
+        setStatus('保存 TG 设置失败: ' + error.message);
+      }
+    };
+    const tgTestBtn = document.getElementById('admin-plus-tg-test');
+    if (tgTestBtn) tgTestBtn.onclick = async () => {
+      try {
+        const botToken = document.querySelector('[name="tg_bot_token"]')?.value?.trim() || '';
+        const chatId = document.querySelector('[name="tg_chat_id"]')?.value?.trim() || '';
+        const tgStatusEl = document.getElementById('admin-plus-tg-status');
+        if (!botToken || !chatId) { if (tgStatusEl) tgStatusEl.innerHTML = '请先填写 Bot Token 和 Chat ID'; return; }
+        const testMsg = '<b>🧪 测试消息</b>\n\nTG Bot 安全管理通知配置成功！\n\n发送 <b>/bchelp</b> 查看可用命令。';
+        const resp = await fetch('https://api.telegram.org/bot' + botToken + '/sendMessage?' + new URLSearchParams({ chat_id: chatId, parse_mode: 'HTML', text: testMsg }).toString());
+        const result = await resp.json();
+        if (result.ok) {
+          if (tgStatusEl) tgStatusEl.innerHTML = '测试消息发送成功！请检查 TG 群组。';
+          setStatus('测试消息已发送');
+        } else {
+          if (tgStatusEl) tgStatusEl.innerHTML = '发送失败: ' + (result.description || '未知错误');
+          setStatus('测试消息发送失败');
+        }
+      } catch (error) {
+        setStatus('发送测试消息失败: ' + error.message);
+      }
+    };
+    const tgWebhookBtn = document.getElementById('admin-plus-tg-webhook');
+    if (tgWebhookBtn) tgWebhookBtn.onclick = async () => {
+      try {
+        const botToken = document.querySelector('[name="tg_bot_token"]')?.value?.trim() || '';
+        const tgStatusEl = document.getElementById('admin-plus-tg-status');
+        if (!botToken) { if (tgStatusEl) tgStatusEl.innerHTML = '请先填写 Bot Token'; return; }
+        const webhookUrl = window.location.origin + '/tg-webhook';
+        const resp = await fetch('https://api.telegram.org/bot' + botToken + '/setWebhook?url=' + encodeURIComponent(webhookUrl) + '&allowed_updates=' + encodeURIComponent(JSON.stringify(['message','edited_message','chat_member'])));
+        const result = await resp.json();
+        const cmds = { commands: [
+          { command: 'bchelp', description: '显示帮助' },
+          { command: 'bcbanned', description: '列出被封用户' },
+          { command: 'bcbaninfo', description: '查封禁详情' },
+          { command: 'bcunban', description: '解封用户' },
+          { command: 'bcsync', description: '同步群成员并封禁退群用户' }
+        ]};
+        const cmdResp = await fetch('https://api.telegram.org/bot' + botToken + '/setMyCommands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cmds) });
+        await fetch('https://api.telegram.org/bot' + botToken + '/deleteMyCommands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: { type: 'all_group_chats' } }) });
+        const cmdResult = await cmdResp.json();
+        const parts = [];
+        if (!result.ok) parts.push('Webhook: ' + (result.description || '失败'));
+        else parts.push('Webhook 注册成功');
+        if (!cmdResult.ok) parts.push('命令: ' + (cmdResult.description || '失败'));
+        else parts.push('命令注册成功');
+        if (tgStatusEl) tgStatusEl.innerHTML = parts.join(' | ');
+        setStatus(parts.join(' | '));
+      } catch (error) {
+        setStatus('Webhook 注册失败: ' + error.message);
+      }
+    };
   loadTab('overview', false);
   } catch(e) {
     var el = document.querySelector('.admin-plus-layout');

@@ -11,3 +11,6 @@ id = "3c41083adc4047108e4cd9ac912a16e2"
 binding = "DB"
 database_name = "beacon-tunnel-db"
 database_id = "c17b4997-81f9-458b-bc7d-07369726f5eb"
+
+[triggers]
+crons = ["0 */6 * * *"]
