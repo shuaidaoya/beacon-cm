@@ -6887,6 +6887,10 @@ function 安全格式化封禁原因(reason) {
     if (normalized === 'subscription-invalid-token-threshold') return '无效令牌过多';
     if (normalized === 'subscription-ip-spread-threshold') return 'IP 扩散异常';
     if (normalized === 'admin' || normalized === 'admin-banned' || normalized === 'admin-ui' || normalized === 'admin-ui-batch') return '管理员手动封禁';
+    if (normalized === 'tg-group-left') return 'TG群组-自行退群';
+    if (normalized === 'tg-group-kicked') return 'TG群组-被踢出群';
+    if (normalized === 'tg-group-sync-left') return 'TG群组-同步检测退群';
+    if (normalized === 'tg-bot-unban') return 'TG机器人解封';
     return String(reason);
 }
 
@@ -7237,7 +7241,7 @@ async function 安全是否允许节点UUID(运行时, 默认UUID, candidateUUID
 async function 安全设置用户订阅状态(运行时, uuid, enabled, meta = {}, nowMs = Date.now()) {
 	const user = await 安全获取用户(运行时, uuid);
 	if (!user) return null;
-	const stateReason = enabled ? null : 'admin-banned';
+	const stateReason = enabled ? null : (meta.reason || 'admin-banned');
 	user.subscriptionState = enabled ? 'active' : 'banned';
 	user.bannedAt = enabled ? null : nowMs;
 	user.bannedReason = stateReason;
