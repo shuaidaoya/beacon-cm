@@ -10575,7 +10575,7 @@ function 生成安全管理后台注入代码() {
       '</div>',
       '<div class="admin-plus-panel"><h3>高风险订阅用户</h3>' +
       renderTable(['用户', '风险等级', '风险分', '本小时订阅', '24 小时趋势', '当前账号'], topSubscriptionRisks.map(item => [
-        escapeHtml(item.profile && item.profile.account || item.profile && item.profile.email || item.uuid || '-'),
+        escapeHtml(item.profile && item.profile.account || item.profile && item.profile.email || item.uuid || '未绑定'),
         '<span class="admin-plus-badge' + getRiskMeta(item.subscription && item.subscription.risk).className + '">' + escapeHtml(getRiskMeta(item.subscription && item.subscription.risk).label) + '</span>',
         '<strong>' + escapeHtml(item.subscription && item.subscription.risk && item.subscription.risk.score || 0) + '</strong>',
         escapeHtml((item.subscription && item.subscription.monitor && item.subscription.monitor.hourlyCount || 0) + ' / ' + (item.subscription && item.subscription.monitor && item.subscription.monitor.hourlyLimit || '-')),
@@ -10623,8 +10623,8 @@ function 生成安全管理后台注入代码() {
       '<div class="admin-plus-panel"><div class="admin-plus-panel-header-wrap"><div><h3>用户列表</h3><div class="admin-plus-desc">支持按用户名、邮箱、UUID、IP 搜索，并执行批量封禁、解封、设置总限额、重置订阅和删除用户。</div></div><div class="admin-plus-toolbar"><input id="admin-plus-user-search" class="admin-plus-inline-input" placeholder="搜索 用户名 / 邮箱 / UUID / IP" value="' + escapeHtml(state.userSearch || '') + '" /><select id="admin-plus-user-status-filter" class="admin-plus-inline-input" style="min-width:160px"><option value="all"' + (state.userStatusFilter === 'all' ? ' selected' : '') + '>全部状态</option><option value="active"' + (state.userStatusFilter === 'active' ? ' selected' : '') + '>正常</option><option value="banned"' + (state.userStatusFilter === 'banned' ? ' selected' : '') + '>已封禁</option></select><button class="admin-plus-btn secondary" type="button" id="admin-plus-select-filtered">全选当前筛选</button><button class="admin-plus-btn secondary" type="button" id="admin-plus-clear-selection">清空选择</button><a class="admin-plus-btn secondary" href="/register" target="_blank" rel="noreferrer">打开用户面板</a></div></div><div class="admin-plus-empty" style="padding:16px 20px;align-items:flex-start;text-align:left">已选择 ' + escapeHtml(selectedCount) + ' 个用户，可直接执行批量动作。<div class="admin-plus-actions"><button class="admin-plus-btn warn" type="button" data-batch-action="ban">批量封禁</button><button class="admin-plus-btn" type="button" data-batch-action="restore">批量解封</button><button class="admin-plus-btn secondary" type="button" data-batch-action="reset-subscription">批量重置订阅</button><button class="admin-plus-btn warn" type="button" data-batch-action="delete">批量删除</button></div></div>',
       renderTable(['选择', '用户名', '邮箱', 'UUID', 'TG账号', '状态', '总限额', '最近活跃', '操作'], filteredUsers.map(item => [
         '<input type="checkbox" data-user-toggle="' + escapeHtml(item.uuid) + '"' + (selectedSet.has(item.uuid) ? ' checked' : '') + ' />',
-        escapeHtml(item.profile && item.profile.account || item.profile && item.profile.email || item.label || '-'),
-        escapeHtml(item.profile && item.profile.email || item.email || '-'),
+        escapeHtml(item.profile && item.profile.account || item.profile && item.profile.email || item.label || item.uuid || '未绑定'),
+        escapeHtml(item.profile && item.profile.email || item.email || '未绑定邮箱'),
         '<code>' + escapeHtml(item.uuid || '-') + '</code>',
 		'<span class="admin-plus-badge muted">' + escapeHtml(item.profile && item.profile.tgUsername || '未绑定') + '</span>',
         '<span class="admin-plus-badge' + getUserStatusMeta(item).className + '">' + escapeHtml(getUserStatusMeta(item).label) + '</span>',
@@ -10656,8 +10656,8 @@ function 生成安全管理后台注入代码() {
           '<button class="admin-plus-btn secondary tiny" data-user-action="reset-subscription" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">轮换订阅令牌</button>' +
           '<button class="admin-plus-btn warn tiny" data-user-action="delete" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">删除用户</button>' +
         '</div></div><div class="admin-plus-detail-grid">' +
-          detail('用户名', selectedUser.profile && selectedUser.profile.account || '-') +
-          detail('邮箱', selectedUser.profile && selectedUser.profile.email || '-') +
+          detail('用户名', selectedUser.profile && selectedUser.profile.account || (selectedUser.uuid || '').slice(0, 8) || '未绑定') +
+          detail('邮箱', selectedUser.profile && selectedUser.profile.email || selectedUser.email || '未绑定邮箱') +
           detail('UUID', '<code>' + escapeHtml(selectedUser.uuid || '-') + '</code>') +
           detail('状态', '<span class="admin-plus-badge' + selectedStatus.className + '">' + escapeHtml(selectedStatus.label) + '</span>') +
           detail('账号状态', '<span class="admin-plus-badge' + ((selectedUser.subscription && selectedUser.subscription.status === 'banned') ? ' warn' : '') + '">' + escapeHtml(selectedUser.subscription && selectedUser.subscription.status === 'banned' ? '已封禁' : '正常') + '</span>') +
