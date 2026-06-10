@@ -1177,6 +1177,10 @@ export default {
 					};
 					if (pending.email) newUserPayload.email = pending.email;
 					const user = await 安全创建用户(运行时, newUserPayload, 访问IP, UA, 安全当前时间(env));
+					// 将TG信息写入用户attributes以持久化到KV/D1
+					user.attributes = user.attributes || {};
+					user.attributes.tgUserId = verifyRecord.tgUserId;
+					user.attributes.tgUsername = verifyRecord.tgUsername;
 					await 安全保存用户记录V2(运行时, user);
 					// 建立TG绑定映射
 					await 安全KV写入JSON(运行时.env, 安全TG绑定键(verifyRecord.tgUserId), {
@@ -1184,6 +1188,13 @@ export default {
 						tgUserId: verifyRecord.tgUserId,
 						tgUsername: verifyRecord.tgUsername,
 						account: pending.account,
+						boundAt: Date.now(),
+					}, 365 * 24 * 3600);
+					// 建立反向KV索引 tg_user:{uuid}
+					await 安全KV写入JSON(运行时.env, 安全TG用户键(user.uuid), {
+						uuid: user.uuid,
+						tgUserId: verifyRecord.tgUserId,
+						tgUsername: verifyRecord.tgUsername,
 						boundAt: Date.now(),
 					}, 365 * 24 * 3600);
 					await 安全记录注册日志(运行时, 'success_tg_verified', user.uuid, 访问IP, UA, {
@@ -6122,12 +6133,14 @@ async function 安全取消所有未执行注册定时任务(运行时, nowMs) {
 
 // ── TG验证常量与键 ──
 const 安全TG绑定前缀 = 'tg_bind:';
+const 安全TG用户前缀 = 'tg_user:';
 const 安全TG验证前缀 = 'tg_verify:';
 const 安全TG绑定日志前缀 = 'sys:tg-bind-log:';
 const 安全TG验证码长度 = 6;
 const 安全TG验证码字符集 = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 function 安全TG绑定键(tgUserId) { return `${安全TG绑定前缀}${tgUserId}`; }
+function 安全TG用户键(uuid) { return 安全TG用户前缀 + uuid.toLowerCase(); }
 function 安全TG验证键(code) { return `${安全TG验证前缀}${code.toUpperCase()}`; }
 function 安全TG绑定日志键(nowMs, logId) { return `${安全TG绑定日志前缀}${nowMs}-${logId}`; }
 
@@ -7957,6 +7970,8 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 				user.profile?.account,
 				user.profile?.email,
 				user.profile?.source,
+				user.profile?.tgUserId,
+				user.profile?.tgUsername,
 			].filter(Boolean).join(' ').toLowerCase();
 			return haystack.includes(keyword);
 		}).filter((user) => {
@@ -8306,6 +8321,8 @@ function 安全提取用户展示信息(user = {}) {
 		label: user.label || null,
 		source: user.source || null,
 		userKey: user.userKey || null,
+		tgUserId: user.tgUserId || attributes.tgUserId || null,
+		tgUsername: user.tgUsername || attributes.tgUsername || null,
 	};
 }
 
@@ -10399,11 +10416,12 @@ function 生成安全管理后台注入代码() {
         card('封禁用户', summary.banned != null ? summary.banned : '-') +
       '</div>',
       '<div class="admin-plus-panel"><div class="admin-plus-panel-header-wrap"><div><h3>用户列表</h3><div class="admin-plus-desc">支持按用户名、邮箱、UUID、IP 搜索，并执行批量封禁、解封、设置总限额、重置订阅和删除用户。</div></div><div class="admin-plus-toolbar"><input id="admin-plus-user-search" class="admin-plus-inline-input" placeholder="搜索 用户名 / 邮箱 / UUID / IP" value="' + escapeHtml(state.userSearch || '') + '" /><select id="admin-plus-user-status-filter" class="admin-plus-inline-input" style="min-width:160px"><option value="all"' + (state.userStatusFilter === 'all' ? ' selected' : '') + '>全部状态</option><option value="active"' + (state.userStatusFilter === 'active' ? ' selected' : '') + '>正常</option><option value="banned"' + (state.userStatusFilter === 'banned' ? ' selected' : '') + '>已封禁</option></select><button class="admin-plus-btn secondary" type="button" id="admin-plus-select-filtered">全选当前筛选</button><button class="admin-plus-btn secondary" type="button" id="admin-plus-clear-selection">清空选择</button><a class="admin-plus-btn secondary" href="/register" target="_blank" rel="noreferrer">打开用户面板</a></div></div><div class="admin-plus-empty" style="padding:16px 20px;align-items:flex-start;text-align:left">已选择 ' + escapeHtml(selectedCount) + ' 个用户，可直接执行批量动作。<div class="admin-plus-actions"><button class="admin-plus-btn warn" type="button" data-batch-action="ban">批量封禁</button><button class="admin-plus-btn" type="button" data-batch-action="restore">批量解封</button><button class="admin-plus-btn secondary" type="button" data-batch-action="reset-subscription">批量重置订阅</button><button class="admin-plus-btn warn" type="button" data-batch-action="delete">批量删除</button></div></div>',
-      renderTable(['选择', '用户名', '邮箱', 'UUID', '状态', '总限额', '最近活跃', '操作'], filteredUsers.map(item => [
+      renderTable(['选择', '用户名', '邮箱', 'UUID', 'TG账号', '状态', '总限额', '最近活跃', '操作'], filteredUsers.map(item => [
         '<input type="checkbox" data-user-toggle="' + escapeHtml(item.uuid) + '"' + (selectedSet.has(item.uuid) ? ' checked' : '') + ' />',
         escapeHtml(item.profile && item.profile.account || item.label || '-'),
         escapeHtml(item.profile && item.profile.email || '-'),
         '<code>' + escapeHtml(item.uuid || '-') + '</code>',
+		'<span class="admin-plus-badge muted">' + escapeHtml(item.profile && item.profile.tgUsername || '未绑定') + '</span>',
         '<span class="admin-plus-badge' + getUserStatusMeta(item).className + '">' + escapeHtml(getUserStatusMeta(item).label) + '</span>',
         escapeHtml(fmtQuotaAdmin(item.traffic)),
         escapeHtml(fmtTime(item.lastSeenAt)),
@@ -10439,6 +10457,8 @@ function 生成安全管理后台注入代码() {
           detail('状态', '<span class="admin-plus-badge' + selectedStatus.className + '">' + escapeHtml(selectedStatus.label) + '</span>') +
           detail('账号状态', '<span class="admin-plus-badge' + ((selectedUser.subscription && selectedUser.subscription.status === 'banned') ? ' warn' : '') + '">' + escapeHtml(selectedUser.subscription && selectedUser.subscription.status === 'banned' ? '已封禁' : '正常') + '</span>') +
           detail('来源', escapeHtml(selectedUser.profile && selectedUser.profile.source || '-')) +
+          detail('TG 用户 ID', '<code>' + escapeHtml(selectedUser.profile && selectedUser.profile.tgUserId || '未绑定') + '</code>') +
+          detail('TG 用户名', escapeHtml(selectedUser.profile && selectedUser.profile.tgUsername || '未绑定')) +
           detail('创建时间', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.createdAt))) +
           detail('更新时间', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.updatedAt))) +
           detail('最近活跃', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.lastSeenAt))) +
@@ -10877,6 +10897,8 @@ export const __adminPlus = {
 	AuthForm校验字段,
 	安全标准化用户唯一键,
 	安全提取用户唯一键,
+	安全提取用户展示信息,
+	安全提取用户展示信息智能,
 	安全布尔值,
 	安全数值,
 	安全标准化接口,
