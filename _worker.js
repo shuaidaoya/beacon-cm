@@ -1650,9 +1650,14 @@ if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
 	}
 	if (访问路径 === 'register/config' && request.method === 'GET') {
 			const cfg = 安全运行时 ? await 读取安全配置(env, 安全运行时) : 获取默认安全配置();
+			const nowMs = Date.now();
+			const 注册状态 = 安全获取注册开放状态(cfg, nowMs);
 			return new Response(JSON.stringify({
 				rulesFrequency: cfg.register?.rulesFrequency || 'always',
-					authMode: 'password',
+				authMode: 'password',
+				signupAvailable: 注册状态.open,
+				registerOpen: 注册状态.open,
+				registerEnabled: 注册状态.open,
 			}), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
 		}
 		if (访问路径 === 'api/stats' && request.method === 'GET') {
