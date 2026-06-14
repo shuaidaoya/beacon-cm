@@ -4220,7 +4220,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 	if (cmd === '/start' && arg && arg.length >= 4 && arg.length <= 8 && tgFrom && tgFrom.id) {
 		try {
 			const tgUserId = tgFrom.id;
-			const tgUsername = tgFrom.username ? '@' + tgFrom.username : (tgFrom.first_name || 'TG用户' + tgUserId);
+			const tgUsername = tgFrom.username ? '@' + tgFrom.username : null;
 			// 读取tg.json获取BotToken和群组ID
 			const TG_TXT = await env.KV.get('tg.json');
 			if (!TG_TXT) return '⚠️ 验证服务未配置，请联系管理员。';
@@ -4267,7 +4267,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 				return '⚠️ 该 Telegram 账号已绑定其他注册用户。';
 			}
 			await 安全记录TG绑定日志(运行时, 'tg.verify.success', null, tgUserId, tgUsername, { code, memberStatus: memberResult.status });
-			const mention = tgFrom.username ? '@' + tgFrom.username : tgUsername;
+			const mention = tgFrom.username ? '@' + tgFrom.username : (tgFrom.first_name || 'TG用户');
 			return '✅ <b>验证成功！</b>\n\n' + mention + ' 已通过群组成员验证。\n注册页面将自动完成注册流程，无需手动操作。';
 		} catch (e) {
 			console.error('[TG验证] /start 验证处理失败:', e?.message || e);
@@ -6330,7 +6330,7 @@ async function 安全处理聊天成员更新(env, body) {
 	const tgUserId = newMember.user.id;
 	const newStatus = newMember.status || '';
 	const oldStatus = oldMember ? (oldMember.status || '') : '';
-	const tgUsername = newMember.user.username ? '@' + newMember.user.username : (newMember.user.first_name || 'TG用户' + tgUserId);
+	const tgUsername = newMember.user.username ? '@' + newMember.user.username : null;
 
 	const 运行时 = await 创建安全运行时(env);
 
