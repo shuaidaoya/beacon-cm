@@ -6479,11 +6479,6 @@ async function 安全TG通知被封用户(运行时, uuid, 封禁信息 = {}) {
 		const mention = tgUsername || ('<a href=\"tg://user?id=' + tgUserId + '\">TG用户' + tgUserId + '</a>');
 		const userMsg = '🚫 <b>账号封禁通知</b>\n\n' + mention + ' 您的账号已被封禁。\n\n<b>账号：</b><code>' + account + '</code>\n<b>原因：</b>' + reason + '\n\n如有疑问请联系管理员。';
 		await 安全调用TG_API(TG.BotToken, 'sendMessage', { chat_id: verifyGroupId, text: userMsg, parse_mode: 'HTML' });
-		const adminChatId = TG.ChatID || TG.SecurityNotifyChatID;
-		if (adminChatId && String(adminChatId) !== String(verifyGroupId)) {
-			const adminMsg = '🚫 <b>封号通知</b>\n\n<b>账号：</b><code>' + account + '</code>\n<b>UUID：</b><code>' + 安全掩码UUID(uuid) + '</code>\n<b>TG：</b>' + mention + '\n<b>原因：</b>' + reason + '\n<b>操作人：</b>' + (封禁信息.operator || '系统自动');
-			await 安全调用TG_API(TG.BotToken, 'sendMessage', { chat_id: adminChatId, text: adminMsg, parse_mode: 'HTML' });
-		}
 		await 安全记录TG绑定日志(运行时, 'user.banned.tg_notified', uuid, tgUserId, tgUsername, { reason });
 	} catch (e) {
 		console.error('[TG封号通知] 发送失败:', e?.message || e);
