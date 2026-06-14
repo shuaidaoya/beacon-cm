@@ -4267,7 +4267,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 				return '⚠️ 该 Telegram 账号已绑定其他注册用户。';
 			}
 			await 安全记录TG绑定日志(运行时, 'tg.verify.success', null, tgUserId, tgUsername, { code, memberStatus: memberResult.status });
-			const mention = tgFrom.username ? '@' + tgFrom.username : '<a href=\"tg://user?id=' + tgUserId + '\">' + tgUsername + '</a>';
+			const mention = tgFrom.username ? '@' + tgFrom.username : tgUsername;
 			return '✅ <b>验证成功！</b>\n\n' + mention + ' 已通过群组成员验证。\n注册页面将自动完成注册流程，无需手动操作。';
 		} catch (e) {
 			console.error('[TG验证] /start 验证处理失败:', e?.message || e);
