@@ -4463,9 +4463,9 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 		tgRecord.totalCheckIns = (tgRecord.totalCheckIns || 0) + 1;
 		tgRecord.updatedAt = nowMs;
 		await 安全KV写入JSON(运行时.env, 安全TG绑定键(tgUserId), tgRecord);
-		const total = user.traffic; const used = user.used_traffic || 0; const rem = Math.max(0, total - used);
+		const total = user.traffic; const used = user.used_traffic || 0;
 		const fmt = (b) => { if (!b || b <= 0) return '0 B'; const k = 1024, u = ['B','KB','MB','GB','TB']; const i = Math.floor(Math.log(b)/Math.log(k)); return parseFloat((b/Math.pow(k,i)).toFixed(1)) + ' ' + u[i]; };
-		return '✅ <b>签到成功！+1GB</b>\n\n🔥 连续签到：<b>' + streak + '</b> 天\n📊 累计签到：<b>' + tgRecord.totalCheckIns + '</b> 次\n💎 当前流量：' + fmt(used) + ' / ' + fmt(total);
+		return '✅ <b>签到成功恭喜获得 ' + fmt(rewardBytes) + ' 流量</b>\n\n🔥 连续签到：<b>' + streak + '</b> 天\n📊 累计签到：<b>' + tgRecord.totalCheckIns + '</b> 次\n💎 当前总流量：' + fmt(total);
 	}
 
 	// ── TG 查询流量命令 ──
