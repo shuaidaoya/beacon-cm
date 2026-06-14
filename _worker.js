@@ -7422,6 +7422,12 @@ async function 安全删除用户账号(运行时, uuid, meta = {}, nowMs = Date
 	await 安全KV删除键(运行时.env, 安全用户木马索引键(sha224(normalizedUuid)));
 	await 安全KV删除键(运行时.env, 安全订阅状态键(normalizedUuid));
 	await 安全KV删除键(运行时.env, 安全活跃封禁键('uuid', normalizedUuid));
+	// 清理TG绑定记录，防止重新注册时误判已绑定
+	const tgUserId = user?.attributes?.tgUserId || user?.tgUserId;
+	if (tgUserId) {
+		await 安全KV删除键(运行时.env, 安全TG绑定键(tgUserId));
+		await 安全KV删除键(运行时.env, 安全TG用户键(normalizedUuid));
+	}
 	await 安全记录事件(运行时, {
 		eventType: 'user.deleted',
 		subjectType: 'uuid',
