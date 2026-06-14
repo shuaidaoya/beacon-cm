@@ -814,7 +814,7 @@ export default {
 						const 运行时 = await 创建安全运行时(env);
 						const tgFrom = msg.from || null;
 						const replyText = await 安全处理TG命令(env, 运行时, msg.text, String(chatId), tgFrom);
-						if (replyText) await fetch('https://api.telegram.org/bot' + TG.BotToken + '/sendMessage?' + new URLSearchParams({ chat_id: chatId, parse_mode: 'HTML', text: replyText }).toString());
+						if (replyText) await 发送TG消息并自动删除(TG.BotToken, chatId, replyText);
 						return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 					}
 					// 非验证命令必须来自已配置的群组
@@ -842,7 +842,7 @@ export default {
 					const 运行时 = await 创建安全运行时(env);
 					const tgFrom = msg.from || null;
 					const replyText = await 安全处理TG命令(env, 运行时, 纯文本, String(chatId), tgFrom);
-					if (replyText) await fetch('https://api.telegram.org/bot' + TG.BotToken + '/sendMessage?' + new URLSearchParams({ chat_id: chatId, parse_mode: 'HTML', text: replyText }).toString());
+					if (replyText) await 发送TG消息并自动删除(TG.BotToken, chatId, replyText);
 				} catch(e) {
 					console.error('[TG Webhook] 处理失败:', e?.message || e);
 					if (replyToChatId && replyToken) {
@@ -6484,6 +6484,19 @@ async function 安全TG通知被封用户(运行时, uuid, 封禁信息 = {}) {
 		console.error('[TG封号通知] 发送失败:', e?.message || e);
 		try { await 安全记录TG绑定日志(运行时, 'user.banned.tg_notify_failed', uuid, null, null, { error: e?.message }); } catch(e2) {}
 	}
+}
+
+// ── 发送群消息并5秒后自动删除（封禁/解封通知除外）──
+async function 发送TG消息并自动删除(botToken, chatId, text, parseMode = 'HTML', deleteAfter = 5000) {
+	const resp = await fetch('https://api.telegram.org/bot' + botToken + '/sendMessage?' + new URLSearchParams({ chat_id: chatId, parse_mode: parseMode, text: text }));
+	const data = await resp.json();
+	if (deleteAfter > 0 && data.result?.message_id) {
+		const msgId = data.result.message_id;
+		setTimeout(async () => {
+			try { await fetch('https://api.telegram.org/bot' + botToken + '/deleteMessage?' + new URLSearchParams({ chat_id: chatId, message_id: String(msgId) })); } catch(e) {}
+		}, deleteAfter);
+	}
+	return data;
 }
 
 // ── TG Bot API 封装 ──
