@@ -788,8 +788,8 @@ export default {
 					replyToken = TG.BotToken;
 					const configuredChatId = String(TG.ChatID || '');
 					const verifyGroupId = TG.VerifyGroupID || TG.ChatID;
-					// 提取验证码参数（/start <code> 或 /start@bot <code>，兼容群组@机器人格式）
-					const 验证码匹配 = msg.text.match(/^\/start(?:@\w+)?\s+([A-Za-z0-9]{4,8})\b/);
+					// 提取验证码参数（/start或/bnbind <code>）
+					const 验证码匹配 = msg.text.match(/^\/(?:start|bnbind)(?:@\w+)?\s+([A-Za-z0-9]{4,8})\b/);
 					if (验证码匹配) {
 						// TG验证命令：仅允许在已配置的官方群组内处理
 						const isVerifyGroup = verifyGroupId && String(chatId) === String(verifyGroupId);
