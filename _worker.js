@@ -179,15 +179,6 @@ function 初始化D1(env) { if (env.DB && typeof env.DB.prepare === 'function') 
 // 心跳机制：每个连接定期写入时间戳，统计最近35秒内有心跳的UUID数（跨全球节点统一）
 const 活跃心跳Map = new Map();
 function 用户心跳(uuid) { if (!uuid) return; 活跃心跳Map.set(uuid, Date.now()); 刷写心跳(uuid).catch(()=>{}); }
-
-// ── TG验证完成心跳（同isolate即时读，解决KV跨节点60s延迟）──
-const TG验证完成Map = new Map();
-function TG验证心跳(code, data) { if (!code) return; TG验证完成Map.set(code.toUpperCase(), { ...data, ts: Date.now() }); setTimeout(() => TG验证完成Map.delete(code.toUpperCase()), 600000); }
-async function TG验证刷写(code, data) {
-	if (!code) return;
-	if (DB实例) { try { await DB实例.prepare('INSERT OR REPLACE INTO kv_config (key, value) VALUES (?, ?)').bind('verify:' + code.toUpperCase(), JSON.stringify(data)).run(); } catch(e) {} }
-	try { await env_global?.KV?.put(安全TG验证键(code), JSON.stringify(data), { expirationTtl: 600 }); } catch(e) {}
-}
 async function 刷写心跳(uuid) {
 	if (!uuid) return;
 	const now = Date.now();
@@ -1250,7 +1241,7 @@ export default {
 						memberStatus: verifyRecord.memberStatus,
 					}, 安全当前时间(env));
 					// 清理验证记录
-					try { await 运行时.env.KV.delete(安全TG验证键(code)); if (DB实例) { try { await DB实例.prepare('DELETE FROM kv_config WHERE key=?').bind('verify:' + code.toUpperCase()).run(); } catch(e) {} }; } catch(e) {}
+					try { await 运行时.env.KV.delete(安全TG验证键(code)); } catch(e) {}
 					return 认证JSON响应('AUTH_SIGNUP_SUCCESS', 'TG验证通过，注册成功！已切换到登录模式，请直接登录。', {
 						account: pending.account,
 						nextMode: 'signin',
@@ -6461,23 +6452,19 @@ async function 安全生成TG验证码(运行时, verifyTimeout) {
 async function 安全校验TG验证码(运行时, code) {
 	if (!运行时 || !运行时.env || !code) return null;
 	const key = 安全TG验证键(code);
-	// 1. 心跳Map（同isolate即时读，<1ms）
-	const cached = TG验证完成Map.get(code.toUpperCase());
-	if (cached && Date.now() <= 安全数值(cached.expiresAt, 0, 0)) return cached;
-	// 2. D1（强一致性，跨isolate ~10ms）
+	// 优先D1（强一致性）
 	if (DB实例) {
 		try {
 			const row = await DB实例.prepare('SELECT value FROM kv_config WHERE key=?').bind('verify:' + code.toUpperCase()).first();
-			if (row?.value) { const r = JSON.parse(row.value); if (Date.now() <= 安全数值(r.expiresAt, 0, 0)) { TG验证完成Map.set(code.toUpperCase(), r); return r; } }
+			if (row?.value) { const r = JSON.parse(row.value); if (Date.now() <= 安全数值(r.expiresAt, 0, 0)) return r; }
 		} catch(e) {}
 	}
-	// 3. KV 回退
+	// KV 回退
 	const record = await 安全KV读取JSON(运行时.env, key, null);
 	if (!record) return null;
 	if (Date.now() > 安全数值(record.expiresAt, 0, 0)) {
 		return { ...record, status: 'expired' };
 	}
-	TG验证完成Map.set(code.toUpperCase(), record);
 	return record;
 }
 
@@ -6515,9 +6502,10 @@ async function 安全标记TG验证完成(运行时, code, tgUserId, tgUsername,
 	record.memberStatus = memberStatus;
 	record.verifiedAt = Date.now();
 	await 安全KV写入JSON(运行时.env, key, record, Math.ceil((record.expiresAt - Date.now()) / 1000));
-	// 心跳：写入同isolate Map，轮询API即时读取
-	TG验证心跳(code, record);
-	TG验证刷写(code, record).catch(() => {});
+	// 同步写D1（强一致性）
+	if (DB实例) {
+		try { await DB实例.prepare('INSERT OR REPLACE INTO kv_config (key, value) VALUES (?, ?)').bind('verify:' + code.toUpperCase(), JSON.stringify(record)).run(); } catch(e) {}
+	}
 	return record;
 }
 
