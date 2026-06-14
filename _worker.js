@@ -4411,6 +4411,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 		const tgUserId = tgFrom.id;
 		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgUserId), null);
 		if (!bindRecord || !bindRecord.uuid) return '⚠️ 您尚未绑定账号，请先在注册页面完成TG验证。';
+		失效用户缓存(bindRecord.uuid);
 		const user = await 安全获取用户(运行时, bindRecord.uuid);
 		if (!user) return '⚠️ 绑定的账号不存在。';
 		if (安全用户已封禁(user)) return '🚫 您的账号已被封禁，无法签到。';
@@ -4419,16 +4420,26 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 		const today = new Date(nowMs + 8*3600*1000).toISOString().slice(0, 10);
 		const lastCheckinDay = tgRecord.lastCheckIn ? new Date(tgRecord.lastCheckIn + 8*3600*1000).toISOString().slice(0, 10) : null;
 		if (lastCheckinDay === today) {
-			return '✅ 今日已签到！\n\n🔥 连续签到：<b>' + (tgRecord.checkInStreak || 0) + '</b> 天\n📊 累计签到：<b>' + (tgRecord.totalCheckIns || 0) + '</b> 次';
+			const total = user.traffic || 0; const used = user.used_traffic || 0; const rem = Math.max(0, total - used);
+			const fmt = (b) => { if (!b || b <= 0) return '0 B'; const k = 1024, u = ['B','KB','MB','GB','TB']; const i = Math.floor(Math.log(b)/Math.log(k)); return parseFloat((b/Math.pow(k,i)).toFixed(1)) + ' ' + u[i]; };
+			return '✅ 今日已签到！\n\n🔥 连续签到：<b>' + (tgRecord.checkInStreak || 0) + '</b> 天\n📊 累计签到：<b>' + (tgRecord.totalCheckIns || 0) + '</b> 次\n💎 当前流量：' + fmt(used) + ' / ' + fmt(total);
 		}
 		const yesterday = new Date(nowMs + 8*3600*1000 - 86400000).toISOString().slice(0, 10);
 		const streak = (lastCheckinDay === yesterday ? (tgRecord.checkInStreak || 0) + 1 : 1);
+		// 签到奖励：+1GB 流量
+		const rewardBytes = 1073741824; // 1GB
+		user.traffic = (user.traffic || 0) + rewardBytes;
+		user.updatedAt = nowMs;
+		await 安全保存用户记录V2(运行时, user);
+		失效用户缓存(user.uuid);
 		tgRecord.checkInStreak = streak;
 		tgRecord.lastCheckIn = nowMs;
 		tgRecord.totalCheckIns = (tgRecord.totalCheckIns || 0) + 1;
 		tgRecord.updatedAt = nowMs;
 		await 安全KV写入JSON(运行时.env, 安全TG绑定键(tgUserId), tgRecord);
-		return '✅ <b>签到成功！</b>\n\n🔥 连续签到：<b>' + streak + '</b> 天\n📊 累计签到：<b>' + tgRecord.totalCheckIns + '</b> 次';
+		const total = user.traffic; const used = user.used_traffic || 0; const rem = Math.max(0, total - used);
+		const fmt = (b) => { if (!b || b <= 0) return '0 B'; const k = 1024, u = ['B','KB','MB','GB','TB']; const i = Math.floor(Math.log(b)/Math.log(k)); return parseFloat((b/Math.pow(k,i)).toFixed(1)) + ' ' + u[i]; };
+		return '✅ <b>签到成功！+1GB</b>\n\n🔥 连续签到：<b>' + streak + '</b> 天\n📊 累计签到：<b>' + tgRecord.totalCheckIns + '</b> 次\n💎 当前流量：' + fmt(used) + ' / ' + fmt(total);
 	}
 
 	// ── TG 查询流量命令 ──
@@ -4436,6 +4447,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 		if (!tgFrom || !tgFrom.id) return '⚠️ 无法识别用户身份。';
 		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgFrom.id), null);
 		if (!bindRecord || !bindRecord.uuid) return '⚠️ 您尚未绑定账号。';
+		失效用户缓存(bindRecord.uuid);
 		const user = await 安全获取用户(运行时, bindRecord.uuid);
 		if (!user) return '⚠️ 绑定的账号不存在。';
 		if (安全用户已封禁(user)) return '🚫 您的账号已被封禁。';
@@ -4457,6 +4469,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 		if (!tgFrom || !tgFrom.id) return '⚠️ 无法识别用户身份。';
 		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgFrom.id), null);
 		if (!bindRecord || !bindRecord.uuid) return '⚠️ 您尚未绑定账号，请先在注册页面完成TG验证。';
+		失效用户缓存(bindRecord.uuid);
 		const user = await 安全获取用户(运行时, bindRecord.uuid);
 		if (!user) return '⚠️ 绑定的账号不存在。';
 		const account = 提取账号(user);
