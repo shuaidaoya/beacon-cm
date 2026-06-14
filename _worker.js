@@ -4297,7 +4297,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 	const parts = 纯文本.trim().split(/\s+/);
 	const cmd = parts[0].toLowerCase().replace(/2$/, '');
 	const arg = parts[1] || '';
-	const 匹配命令 = (name) => cmd === '/' + name || cmd === '/' + name + '2';
+	const 匹配命令 = (name) => cmd === '/' + name || cmd === '/' + name + '2' || cmd === '/' + name + '@' + (tgFrom?.username || '');
 
 	const 提取账号 = (u) => {
 		if (!u) return '-';
@@ -4373,21 +4373,22 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 		}
 	}
 
-	if (匹配命令('bchelp') || cmd === '/start') {
-		return '<b>🔐 安全管理 Bot 命令</b>\n\n' +
-			'<b>/bchelp</b> — 显示此帮助\n' +
+	if (匹配命令('bnhelp') || cmd === '/start') {
+		return '<b>🔐 Beacon 灯塔 Bot 命令</b>\n\n' +
+			'<b>/bnhelp</b> — 显示此帮助\n' +
+			'<b>/bncheckin</b> — 每日签到\n' +
+			'<b>/bntraffic</b> — 查询剩余流量\n' +
+			'<b>/bnstatus</b> — 查询账户状态\n\n' +
+			'<b>🔰 管理命令（仅管理员）</b>\n' +
 			'<b>/bcbanned</b> — 列出所有被封禁用户\n' +
 			'<b>/bcbaninfo</b> <code>&lt;用户名&gt;</code> — 查封禁详情\n' +
 			'<b>/bcunban</b> <code>&lt;用户名&gt;</code> — 解封用户\n' +
-			'<b>/bcsync</b> — 同步群成员并封禁退群用户（仅管理员）\n' +
-			'<b>/checkin</b> — 每日签到\n' +
-			'<b>/traffic</b> — 查询剩余流量\n' +
-			'<b>/mystatus</b> — 查询账户状态\n\n' +
+			'<b>/bcsync</b> — 同步群成员并封禁退群用户\n\n' +
 			'提示：群内有多个机器人时，用 <code>@机器人用户名</code> 指定目标。';
 	}
 
 	// ── TG 签到命令 ──
-	if (匹配命令('checkin')) {
+	if (匹配命令('bncheckin')) {
 		if (!tgFrom || !tgFrom.id) return '⚠️ 无法识别用户身份。';
 		const tgUserId = tgFrom.id;
 		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgUserId), null);
@@ -4413,7 +4414,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 	}
 
 	// ── TG 查询流量命令 ──
-	if (匹配命令('traffic')) {
+	if (匹配命令('bntraffic')) {
 		if (!tgFrom || !tgFrom.id) return '⚠️ 无法识别用户身份。';
 		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgFrom.id), null);
 		if (!bindRecord || !bindRecord.uuid) return '⚠️ 您尚未绑定账号。';
@@ -4434,7 +4435,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 	}
 
 	// ── TG 账户状态命令 ──
-	if (匹配命令('mystatus')) {
+	if (匹配命令('bnstatus')) {
 		if (!tgFrom || !tgFrom.id) return '⚠️ 无法识别用户身份。';
 		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgFrom.id), null);
 		if (!bindRecord || !bindRecord.uuid) return '⚠️ 您尚未绑定账号，请先在注册页面完成TG验证。';
