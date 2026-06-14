@@ -860,7 +860,7 @@ export default {
 						info.botConfigured = !!TG.BotToken;
 						info.chatId = TG.ChatID || 'none';
 						if (TG.BotToken) {
-							const commands = [
+							const userCommands = [
 								{ command: 'bnhelp', description: '显示帮助菜单' },
 								{ command: 'bnbind', description: '绑定TG账号（验证码）' },
 								{ command: 'bnwhoami', description: '查看我的TG ID和绑定状态' },
@@ -868,13 +868,25 @@ export default {
 								{ command: 'bntraffic', description: '查询剩余流量' },
 								{ command: 'bnstatus', description: '查询账户状态' },
 							];
-							const [wResp, cResp, sResp] = await Promise.all([
+							const adminCommands = [
+								{ command: 'bcbanned', description: '列出被封禁用户' },
+								{ command: 'bcbaninfo', description: '查封禁详情' },
+								{ command: 'bcunban', description: '解封用户' },
+								{ command: 'bcunbind', description: '手动解绑TG' },
+								{ command: 'bcsync', description: '同步群成员并封禁退群用户' },
+							];
+							const [wResp, cResp, sResp, aResp] = await Promise.all([
 								fetch('https://api.telegram.org/bot' + TG.BotToken + '/getWebhookInfo'),
 								fetch('https://api.telegram.org/bot' + TG.BotToken + '/getMyCommands'),
 								fetch('https://api.telegram.org/bot' + TG.BotToken + '/setMyCommands', {
 									method: 'POST',
 									headers: { 'Content-Type': 'application/json' },
-									body: JSON.stringify({ commands, scope: { type: 'all_group_chats' } })
+									body: JSON.stringify({ commands: userCommands, scope: { type: 'all_group_chats' } })
+								}),
+								fetch('https://api.telegram.org/bot' + TG.BotToken + '/setMyCommands', {
+									method: 'POST',
+									headers: { 'Content-Type': 'application/json' },
+									body: JSON.stringify({ commands: [...userCommands, ...adminCommands], scope: { type: 'all_chat_administrators' } })
 								})
 							]);
 							info.webhookInfo = await wResp.json();
