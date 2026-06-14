@@ -6299,6 +6299,36 @@ async function 安全检查TG重复绑定(运行时, tgUserId) {
 	return await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgUserId), null);
 }
 
+// ── TG封号通知（@用户 + 通知管理员）──
+async function 安全TG通知被封用户(运行时, uuid, 封禁信息 = {}) {
+	if (!运行时 || !运行时.env || !uuid) return;
+	try {
+		const TG_TXT = await 运行时.env.KV.get('tg.json');
+		if (!TG_TXT) return;
+		const TG = JSON.parse(TG_TXT);
+		if (!TG.BotToken) return;
+		const verifyGroupId = TG.VerifyGroupID || TG.ChatID;
+		if (!verifyGroupId) return;
+		const tgUserId = 封禁信息.tgUserId || null;
+		if (!tgUserId) return;
+		const tgUsername = 封禁信息.tgUsername || null;
+		const account = 封禁信息.account || '-';
+		const reason = 封禁信息.reason || '违反使用规则';
+		const mention = tgUsername || ('<a href=\"tg://user?id=' + tgUserId + '\">TG用户' + tgUserId + '</a>');
+		const userMsg = '🚫 <b>账号封禁通知</b>\n\n' + mention + ' 您的账号已被封禁。\n\n<b>账号：</b><code>' + account + '</code>\n<b>原因：</b>' + reason + '\n\n如有疑问请联系管理员。';
+		await 安全调用TG_API(TG.BotToken, 'sendMessage', { chat_id: verifyGroupId, text: userMsg, parse_mode: 'HTML' });
+		const adminChatId = TG.ChatID || TG.SecurityNotifyChatID;
+		if (adminChatId && String(adminChatId) !== String(verifyGroupId)) {
+			const adminMsg = '🚫 <b>封号通知</b>\n\n<b>账号：</b><code>' + account + '</code>\n<b>UUID：</b><code>' + 安全掩码UUID(uuid) + '</code>\n<b>TG：</b>' + mention + '\n<b>原因：</b>' + reason + '\n<b>操作人：</b>' + (封禁信息.operator || '系统自动');
+			await 安全调用TG_API(TG.BotToken, 'sendMessage', { chat_id: adminChatId, text: adminMsg, parse_mode: 'HTML' });
+		}
+		await 安全记录TG绑定日志(运行时, 'user.banned.tg_notified', uuid, tgUserId, tgUsername, { reason });
+	} catch (e) {
+		console.error('[TG封号通知] 发送失败:', e?.message || e);
+		try { await 安全记录TG绑定日志(运行时, 'user.banned.tg_notify_failed', uuid, null, null, { error: e?.message }); } catch(e2) {}
+	}
+}
+
 // ── TG Bot API 封装 ──
 async function 安全调用TG_API(botToken, method, params = {}, maxRetries = 3) {
 	const baseUrl = `https://api.telegram.org/bot${botToken}/${method}`;
@@ -7334,6 +7364,16 @@ async function 安全设置用户订阅状态(运行时, uuid, enabled, meta = {
 		['原因', 安全格式化封禁原因(enabled ? (meta.reason || 'admin-restored') : stateReason)],
 		['来源', meta.source || '后台管理面板'],
 	]);
+	// TG @通知被封用户
+	if (!enabled && saved.attributes?.tgUserId) {
+		安全TG通知被封用户(运行时, saved.uuid, {
+			tgUserId: saved.attributes.tgUserId,
+			tgUsername: saved.attributes.tgUsername,
+			account: account,
+			reason: 安全格式化封禁原因(stateReason),
+			operator: meta.source || '后台管理面板'
+		});
+	}
 	return saved;
 }
 
@@ -7366,6 +7406,16 @@ async function 安全封禁用户账号(运行时, uuid, meta = {}, nowMs = Date
 		['触发', meta.trigger || '-'],
 		['来源', meta.source || '订阅风控自动封禁'],
 	]);
+	// TG @通知被封用户
+	if (saved.attributes?.tgUserId) {
+		安全TG通知被封用户(运行时, saved.uuid, {
+			tgUserId: saved.attributes.tgUserId,
+			tgUsername: saved.attributes.tgUsername,
+			account: account,
+			reason: 安全格式化封禁原因(meta.reason || 'subscription-threshold-exceeded'),
+			operator: meta.source || '订阅风控自动封禁'
+		});
+	}
 	return saved;
 }
 
