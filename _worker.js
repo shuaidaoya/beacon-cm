@@ -1187,6 +1187,8 @@ export default {
 					user.attributes = user.attributes || {};
 					user.attributes.tgUserId = verifyRecord.tgUserId;
 					user.attributes.tgUsername = verifyRecord.tgUsername;
+					user.attributes.tgFirstName = verifyRecord.tgFirstName || null;
+					user.attributes.tgLastName = verifyRecord.tgLastName || null;
 					await 安全保存用户记录V2(运行时, user);
 					// 建立TG绑定映射
 					await 安全KV写入JSON(运行时.env, 安全TG绑定键(verifyRecord.tgUserId), {
@@ -1375,6 +1377,59 @@ if (访问路径 === 'register/login' || 访问路径 === 'register/login/') {
 				return 认证JSON响应('AUTH_SIGNIN_FAILED', `密码设置失败：${error?.message || '服务器内部异常'}`, null, 500);
 			}
 		}
+
+	// ── TG Profile API ──
+	if ((访问路径 === 'api/tg/profile' || 访问路径 === 'api/tg/profile/') && request.method === 'GET') {
+		try {
+			const 运行时 = await 创建安全运行时(env);
+			const uuid = url.searchParams.get('uuid');
+			if (!uuid || !安全UUID有效(uuid)) return 认证JSON响应('AUTH_VALIDATION_ERROR', '请提供有效的 UUID。', null, 400);
+			const user = await 安全获取用户(运行时, uuid);
+			if (!user) return 认证JSON响应('AUTH_USER_NOT_FOUND', '用户不存在。', null, 404);
+			const profile = 安全提取用户展示信息(user);
+			const tgRecord = profile.tgUserId ? await 安全KV读取JSON(运行时.env, 安全TG绑定键(profile.tgUserId), null) : null;
+			return new Response(JSON.stringify({
+				code: 'TG_PROFILE_SUCCESS',
+				data: {
+					tgUserId: profile.tgUserId || null,
+					tgUsername: profile.tgUsername || null,
+					tgFirstName: profile.tgFirstName || null,
+					tgLastName: profile.tgLastName || null,
+					boundAt: tgRecord?.boundAt || null,
+					checkInStreak: tgRecord?.checkInStreak || 0,
+					lastCheckIn: tgRecord?.lastCheckIn || 0,
+					totalCheckIns: tgRecord?.totalCheckIns || 0,
+				}
+			}), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
+		} catch (e) {
+			return 认证JSON响应('TG_PROFILE_FAILED', '查询失败：' + (e?.message || '服务器内部错误'), null, 500);
+		}
+	}
+	if ((访问路径 === 'api/tg/profile/by-tg' || 访问路径 === 'api/tg/profile/by-tg/') && request.method === 'GET') {
+		try {
+			const 运行时 = await 创建安全运行时(env);
+			const tgUserId = url.searchParams.get('tgUserId');
+			if (!tgUserId) return 认证JSON响应('AUTH_VALIDATION_ERROR', '请提供 tgUserId。', null, 400);
+			const tgRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgUserId), null);
+			if (!tgRecord || !tgRecord.uuid) return 认证JSON响应('TG_NOT_BOUND', '该 TG 账号未绑定任何用户。', null, 404);
+			const user = await 安全获取用户(运行时, tgRecord.uuid);
+			if (!user) return 认证JSON响应('AUTH_USER_NOT_FOUND', '绑定的用户不存在。', null, 404);
+			const profile = 安全提取用户展示信息(user);
+			return new Response(JSON.stringify({
+				code: 'TG_PROFILE_SUCCESS',
+				data: {
+					uuid: tgRecord.uuid,
+					tgUserId: Number(tgUserId),
+					tgUsername: profile.tgUsername || tgRecord.tgUsername || null,
+					tgFirstName: profile.tgFirstName || tgRecord.tgFirstName || null,
+					boundAt: tgRecord.boundAt || null,
+					account: profile.account || null,
+				}
+			}), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
+		} catch (e) {
+			return 认证JSON响应('TG_PROFILE_FAILED', '查询失败：' + (e?.message || '服务器内部错误'), null, 500);
+		}
+	}
 
 if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
 			try {
@@ -4221,6 +4276,8 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 		try {
 			const tgUserId = tgFrom.id;
 			const tgUsername = tgFrom.username ? '@' + tgFrom.username : null;
+			const tgFirstName = tgFrom.first_name || null;
+			const tgLastName = tgFrom.last_name || null;
 			// 读取tg.json获取BotToken和群组ID
 			const TG_TXT = await env.KV.get('tg.json');
 			if (!TG_TXT) return '⚠️ 验证服务未配置，请联系管理员。';
@@ -4259,7 +4316,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 				return '⏳ 验证服务暂时不可用，请稍后重试。\n\n若持续失败请联系管理员。';
 			}
 			// 标记验证成功
-			const updated = await 安全标记TG验证完成(运行时, code, tgUserId, tgUsername, memberResult.status);
+			const updated = await 安全标记TG验证完成(运行时, code, tgUserId, tgUsername, tgFirstName, tgLastName, memberResult.status);
 			if (!updated) {
 				return '⚠️ 验证处理失败，请刷新注册页面重新获取验证码。';
 			}
@@ -6209,7 +6266,7 @@ async function 安全校验TG验证码(运行时, code) {
 	return record;
 }
 
-async function 安全标记TG验证完成(运行时, code, tgUserId, tgUsername, memberStatus) {
+async function 安全标记TG验证完成(运行时, code, tgUserId, tgUsername, tgFirstName, tgLastName, memberStatus) {
 	if (!运行时 || !运行时.env || !code) return null;
 	const key = 安全TG验证键(code);
 	const record = await 安全KV读取JSON(运行时.env, key, null);
@@ -6229,6 +6286,8 @@ async function 安全标记TG验证完成(运行时, code, tgUserId, tgUsername,
 	record.status = 'verified';
 	record.tgUserId = tgUserId;
 	record.tgUsername = tgUsername;
+	record.tgFirstName = tgFirstName || null;
+	record.tgLastName = tgLastName || null;
 	record.memberStatus = memberStatus;
 	record.verifiedAt = Date.now();
 	await 安全KV写入JSON(运行时.env, key, record, Math.ceil((record.expiresAt - Date.now()) / 1000));
@@ -8526,6 +8585,8 @@ function 安全提取用户展示信息(user = {}) {
 		userKey: user.userKey || null,
 		tgUserId: user.tgUserId || attributes.tgUserId || null,
 		tgUsername: user.tgUsername || attributes.tgUsername || null,
+		tgFirstName: user.tgFirstName || attributes.tgFirstName || null,
+		tgLastName: user.tgLastName || attributes.tgLastName || null,
 	};
 }
 
@@ -10635,7 +10696,7 @@ function 生成安全管理后台注入代码() {
         escapeHtml(item.profile && item.profile.account || item.profile && item.profile.email || item.label || item.uuid || '未绑定'),
         escapeHtml(item.profile && item.profile.email || item.email || '未绑定邮箱'),
         '<code>' + escapeHtml(item.uuid || '-') + '</code>',
-		'<span class="admin-plus-badge muted">' + escapeHtml(item.profile && item.profile.tgUsername || '未绑定') + '</span>',
+		'<span class="admin-plus-badge muted">' + escapeHtml(item.profile && (item.profile.tgUsername || item.profile.tgFirstName) || '未绑定') + '</span>',
         '<span class="admin-plus-badge' + getUserStatusMeta(item).className + '">' + escapeHtml(getUserStatusMeta(item).label) + '</span>',
         escapeHtml(fmtQuotaAdmin(item.traffic)),
         escapeHtml(fmtTime(item.lastSeenAt)),
@@ -10672,7 +10733,7 @@ function 生成安全管理后台注入代码() {
           detail('账号状态', '<span class="admin-plus-badge' + ((selectedUser.subscription && selectedUser.subscription.status === 'banned') ? ' warn' : '') + '">' + escapeHtml(selectedUser.subscription && selectedUser.subscription.status === 'banned' ? '已封禁' : '正常') + '</span>') +
           detail('来源', escapeHtml(selectedUser.profile && selectedUser.profile.source || '-')) +
           detail('TG 用户 ID', '<code>' + escapeHtml(selectedUser.profile && selectedUser.profile.tgUserId || '未绑定') + '</code>') +
-          detail('TG 用户名', escapeHtml(selectedUser.profile && selectedUser.profile.tgUsername || '未绑定')) +
+          detail('TG 用户名', escapeHtml(selectedUser.profile && (selectedUser.profile.tgUsername || selectedUser.profile.tgFirstName) || '未绑定')) +
           detail('创建时间', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.createdAt))) +
           detail('更新时间', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.updatedAt))) +
           detail('最近活跃', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.lastSeenAt))) +
