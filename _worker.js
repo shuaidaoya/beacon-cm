@@ -4220,7 +4220,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 	if (cmd === '/start' && arg && arg.length >= 4 && arg.length <= 8 && tgFrom && tgFrom.id) {
 		try {
 			const tgUserId = tgFrom.id;
-			const tgUsername = tgFrom.username ? '@' + tgFrom.username : String(tgUserId);
+			const tgUsername = tgFrom.username ? '@' + tgFrom.username : (tgFrom.first_name || 'TG用户' + tgUserId);
 			// 读取tg.json获取BotToken和群组ID
 			const TG_TXT = await env.KV.get('tg.json');
 			if (!TG_TXT) return '⚠️ 验证服务未配置，请联系管理员。';
@@ -6329,7 +6329,7 @@ async function 安全处理聊天成员更新(env, body) {
 	const tgUserId = newMember.user.id;
 	const newStatus = newMember.status || '';
 	const oldStatus = oldMember ? (oldMember.status || '') : '';
-	const tgUsername = newMember.user.username ? '@' + newMember.user.username : String(tgUserId);
+	const tgUsername = newMember.user.username ? '@' + newMember.user.username : (newMember.user.first_name || 'TG用户' + tgUserId);
 
 	const 运行时 = await 创建安全运行时(env);
 
