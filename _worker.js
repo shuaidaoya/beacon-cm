@@ -6494,10 +6494,8 @@ async function 发送TG消息并自动删除(botToken, chatId, text, ctx, trigge
 		const msgId = data.result?.message_id;
 		ctx.waitUntil((async () => {
 			await new Promise(r => setTimeout(r, deleteAfter));
-			// 删除触发命令消息
-			if (triggerMsgId) { try { await fetch('https://api.telegram.org/bot' + botToken + '/deleteMessage?' + new URLSearchParams({ chat_id: chatId, message_id: String(triggerMsgId) })); } catch(e) {} }
-			// 删除Bot回复消息
-			if (msgId) { try { await fetch('https://api.telegram.org/bot' + botToken + '/deleteMessage?' + new URLSearchParams({ chat_id: chatId, message_id: String(msgId) })); } catch(e) {} }
+			if (triggerMsgId) { try { const r = await fetch('https://api.telegram.org/bot' + botToken + '/deleteMessage?' + new URLSearchParams({ chat_id: chatId, message_id: String(triggerMsgId) })); if (!r.ok) console.warn('[auto-delete] trigger failed', await r.text()); } catch(e) { console.warn('[auto-delete] trigger error', e.message); } }
+			if (msgId) { try { const r = await fetch('https://api.telegram.org/bot' + botToken + '/deleteMessage?' + new URLSearchParams({ chat_id: chatId, message_id: String(msgId) })); if (!r.ok) console.warn('[auto-delete] response failed', await r.text()); } catch(e) { console.warn('[auto-delete] response error', e.message); } }
 		})());
 	}
 	return data;
