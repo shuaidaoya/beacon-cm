@@ -814,7 +814,7 @@ export default {
 						const 运行时 = await 创建安全运行时(env);
 						const tgFrom = msg.from || null;
 						const replyText = await 安全处理TG命令(env, 运行时, msg.text, String(chatId), tgFrom);
-						if (replyText) await 发送TG消息并自动删除(TG.BotToken, chatId, replyText);
+						if (replyText) await 发送TG消息并自动删除(TG.BotToken, chatId, replyText, ctx);
 						return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 					}
 					// 非验证命令必须来自已配置的群组
@@ -842,7 +842,7 @@ export default {
 					const 运行时 = await 创建安全运行时(env);
 					const tgFrom = msg.from || null;
 					const replyText = await 安全处理TG命令(env, 运行时, 纯文本, String(chatId), tgFrom);
-					if (replyText) await 发送TG消息并自动删除(TG.BotToken, chatId, replyText);
+					if (replyText) await 发送TG消息并自动删除(TG.BotToken, chatId, replyText, ctx);
 				} catch(e) {
 					console.error('[TG Webhook] 处理失败:', e?.message || e);
 					if (replyToChatId && replyToken) {
@@ -6487,14 +6487,15 @@ async function 安全TG通知被封用户(运行时, uuid, 封禁信息 = {}) {
 }
 
 // ── 发送群消息并5秒后自动删除（封禁/解封通知除外）──
-async function 发送TG消息并自动删除(botToken, chatId, text, parseMode = 'HTML', deleteAfter = 5000) {
+async function 发送TG消息并自动删除(botToken, chatId, text, ctx, parseMode = 'HTML', deleteAfter = 5000) {
 	const resp = await fetch('https://api.telegram.org/bot' + botToken + '/sendMessage?' + new URLSearchParams({ chat_id: chatId, parse_mode: parseMode, text: text }));
 	const data = await resp.json();
-	if (deleteAfter > 0 && data.result?.message_id) {
+	if (deleteAfter > 0 && data.result?.message_id && ctx) {
 		const msgId = data.result.message_id;
-		setTimeout(async () => {
+		ctx.waitUntil((async () => {
+			await new Promise(r => setTimeout(r, deleteAfter));
 			try { await fetch('https://api.telegram.org/bot' + botToken + '/deleteMessage?' + new URLSearchParams({ chat_id: chatId, message_id: String(msgId) })); } catch(e) {}
-		}, deleteAfter);
+		})());
 	}
 	return data;
 }
