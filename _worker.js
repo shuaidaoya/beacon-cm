@@ -4433,6 +4433,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 			'<b>/bcunban</b> <code>&lt;用户名&gt;</code> — 解封用户\n' +
 			'<b>/bcunbind</b> <code>&lt;TGID&gt;</code> — 手动解绑TG\n' +
 			'<b>/bcpurge</b> <code>&lt;UUID&gt;</code> — 清理D1脏数据\n' +
+			'<b>/bcpurgeall</b> — ⚠️ 清空所有用户\n' +
 			'<b>/bcsync</b> — 同步群成员并封禁退群用户\n\n' +
 			'提示：群内有多个机器人时，用 <code>@机器人用户名</code> 指定目标。';
 	}
@@ -4519,6 +4520,25 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 			'<b>TG用户名：</b>' + (bindRecord.tgUsername || '未设置') + '\n' +
 			'<b>流量：</b>' + fmt(usedBytes) + ' / ' + fmt(totalBytes) + '\n' +
 			'<b>签到：</b>' + (checkedInToday ? '✅ 今日已签到' : '⬜ 今日未签到') + ' | 连续' + (tgRecord.checkInStreak || 0) + '天 | 累计' + (tgRecord.totalCheckIns || 0) + '次';
+	}
+
+	// ── 清空所有用户（管理员慎用）──
+	if (匹配命令('bcpurgeall')) {
+		if (!运行时 || !运行时.env) return '系统暂不可用';
+		const allUsers = await 安全列出KV记录(运行时.env, 'sys:user:', 5000);
+		if (!allUsers || allUsers.length === 0) return '✅ 当前没有用户。';
+		const count = allUsers.length;
+		let ok = 0, fail = 0;
+		for (const u of allUsers) {
+			if (!u?.uuid) continue;
+			try {
+				await 运行时.env.KV.delete(安全用户前缀 + u.uuid.toLowerCase());
+				await 运行时.env.KV.put('sys:deleted:' + u.uuid.toLowerCase(), JSON.stringify({ deletedAt: Date.now() }));
+				if (u.userKey) await 运行时.env.KV.delete(安全用户索引键(u.userKey));
+				ok++;
+			} catch(e) { fail++; }
+		}
+		return '✅ 已清理 ' + ok + '/' + count + ' 个用户。' + (fail > 0 ? '\n❌ 失败：' + fail : '') + '\n\n💡 新用户注册默认流量已设为 100GB。';
 	}
 
 	// ── 设置墓碑标记阻止登录（D1过载时替代清理）──
@@ -7375,7 +7395,7 @@ async function 安全确保用户存在(运行时, uuid, 元数据 = {}) {
 		subscriptionToken: 安全生成订阅访问令牌(),
 		subscriptionTokenUpdatedAt: nowMs,
 		subscriptionState: 'active',
-		traffic: 30 * 1024 * 1024 * 1024, // 默认 30GB
+		traffic: 100 * 1024 * 1024 * 1024, // 默认 100GB
 		used_traffic: 0,
 		bannedAt: null,
 		bannedReason: null,
