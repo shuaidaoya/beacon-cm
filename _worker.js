@@ -1216,8 +1216,11 @@ export default {
 					user.attributes.tgUsername = verifyRecord.tgUsername;
 					user.attributes.tgFirstName = verifyRecord.tgFirstName || null;
 					user.attributes.tgLastName = verifyRecord.tgLastName || null;
-					await 安全保存用户记录V2(运行时, user);
-					// 建立TG绑定映射
+					// KV同步写入（即时生效），D1异步写入（不阻塞注册跳转）
+					await 安全KV写入JSON(运行时.env, 安全用户前缀 + user.uuid, user);
+					if (DB实例) {
+						安全保存用户记录V2(运行时, user).catch(e => console.error('[TG注册] D1异步写入失败:', e.message));
+					}
 					await 安全KV写入JSON(运行时.env, 安全TG绑定键(verifyRecord.tgUserId), {
 						uuid: user.uuid,
 						tgUserId: verifyRecord.tgUserId,
@@ -1232,7 +1235,8 @@ export default {
 						tgUsername: verifyRecord.tgUsername,
 						boundAt: Date.now(),
 					}, 365 * 24 * 3600);
-					await 安全记录注册日志(运行时, 'success_tg_verified', user.uuid, 访问IP, UA, {
+					// 注册日志异步写入（D1过载不阻塞响应）
+					安全记录注册日志(运行时, 'success_tg_verified', user.uuid, 访问IP, UA, {
 						account: pending.account,
 						tgUserId: verifyRecord.tgUserId,
 						tgUsername: verifyRecord.tgUsername,
