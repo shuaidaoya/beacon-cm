@@ -4536,7 +4536,6 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 				await 运行时.env.KV.delete(安全用户前缀 + nUuid);
 				await 运行时.env.KV.put('sys:deleted:' + nUuid, JSON.stringify({ deletedAt: Date.now() }));
 				if (u.userKey) await 运行时.env.KV.delete(安全用户索引键(u.userKey));
-				// 清理TG绑定
 				const tgId = u.attributes?.tgUserId || u.tgUserId;
 				if (tgId) {
 					await 运行时.env.KV.delete(安全TG绑定键(String(tgId)));
@@ -4546,7 +4545,14 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 				ok++;
 			} catch(e) { fail++; }
 		}
-		return '✅ 已清理 ' + ok + '/' + count + ' 个用户。' + (fail > 0 ? '\n❌ 失败：' + fail : '') + '\n\n💡 新用户注册默认流量已设为 100GB。';
+		// D1清空（异步，不阻塞返回）
+		if (DB实例) {
+			try { await DB实例.prepare('DELETE FROM users').run(); } catch(e) { console.error('[清空] D1删除失败:', e.message); }
+			try { await DB实例.prepare('DELETE FROM online_heartbeat').run(); } catch(e) {} 
+			try { await DB实例.prepare('DELETE FROM global_traffic').run(); } catch(e) {}
+			try { await DB实例.prepare('DELETE FROM daily_traffic').run(); } catch(e) {}
+		}
+		return '✅ 已清空 ' + ok + '/' + count + ' 个用户 (KV+D1)。\n💡 新用户注册默认流量已设为 100GB。';
 	}
 
 	// ── 设置墓碑标记阻止登录（D1过载时替代清理）──
