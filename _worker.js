@@ -759,6 +759,11 @@ export default {
 		const 当前安全配置 = 安全运行时 ? await 读取安全配置(env, 安全运行时) : 安全标准化配置({}, env);
 		const 当前节点UUID = await 安全解析请求节点UUID(安全运行时, request, url, userID);
 		if (env.GO2SOCKS5) SOCKS5白名单 = await 整理成数组(env.GO2SOCKS5);
+		// 劫持防护：直接丢弃含 proxyip= 的攻击请求，不消耗任何资源
+		const 攻击特征 = ['proxyip=', 'ProxyIP', 'CMLiussss', 'jump.html', 'sqlmap', 'nmap', 'u=gzip', 'HTTP/2 404'];
+		if (攻击特征.some(f => 访问路径.includes(f)) || url.searchParams.has('proxyip') || 访问IP === '::1') {
+			return new Response('', { status: 444 });
+		}
 		// TG webhook – MUST be at top, before any other processing
 		if (访问路径 === 'tg-webhook' || 访问路径 === 'tg-webhook/' || 访问路径.startsWith('tg-webhook?')) {
 			if (request.method === 'POST') {
