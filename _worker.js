@@ -4431,6 +4431,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 			'<b>/bcbaninfo</b> <code>&lt;用户名&gt;</code> — 查封禁详情\n' +
 			'<b>/bcunban</b> <code>&lt;用户名&gt;</code> — 解封用户\n' +
 			'<b>/bcunbind</b> <code>&lt;TGID&gt;</code> — 手动解绑TG\n' +
+			'<b>/bcpurge</b> <code>&lt;UUID&gt;</code> — 清理D1脏数据\n' +
 			'<b>/bcsync</b> — 同步群成员并封禁退群用户\n\n' +
 			'提示：群内有多个机器人时，用 <code>@机器人用户名</code> 指定目标。';
 	}
@@ -4517,6 +4518,22 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 			'<b>TG用户名：</b>' + (bindRecord.tgUsername || '未设置') + '\n' +
 			'<b>流量：</b>' + fmt(usedBytes) + ' / ' + fmt(totalBytes) + '\n' +
 			'<b>签到：</b>' + (checkedInToday ? '✅ 今日已签到' : '⬜ 今日未签到') + ' | 连续' + (tgRecord.checkInStreak || 0) + '天 | 累计' + (tgRecord.totalCheckIns || 0) + '次';
+	}
+
+	// ── 清理D1脏数据（管理员，删用户后仍能登录时用）──
+	if (匹配命令('bcpurge')) {
+		if (!tgFrom?.id) return '⚠️ 无法识别用户身份。';
+		const uuid = arg.trim().toLowerCase();
+		if (!安全UUID有效(uuid)) return '⚠️ 请提供有效的 UUID。\n用法：<code>/bcpurge 197a594c-6bb9-4b62-a6fc-56e4cd656f0b</code>';
+		if (DB实例) {
+			try {
+				await DB实例.prepare('DELETE FROM users WHERE uuid=?').bind(uuid).run();
+				return '✅ 已清理 D1 中 UUID <code>' + 安全掩码UUID(uuid) + '</code> 的记录。';
+			} catch(e) {
+				return '⚠️ D1 清理失败：' + (e?.message || '未知错误');
+			}
+		}
+		return '⚠️ D1 数据库不可用。';
 	}
 
 	// ── 手动解绑TG（管理员）──
