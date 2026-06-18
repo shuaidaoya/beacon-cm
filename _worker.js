@@ -8376,6 +8376,11 @@ async function 安全列出KV记录(env, prefix, limit = 50) {
 				subscriptionState: row.subscriptionState,
 				traffic: row.traffic || 0, used_traffic: row.used_traffic || 0, expiry: row.expiry || 0,
 				email: row.email || null,
+				registerIp: row.registerIp || null,
+				deviceFp: row.deviceFp || null,
+				riskScore: row.riskScore || 0,
+				riskClusterId: row.riskClusterId || null,
+				riskFlags: (() => { try { return JSON.parse(row.riskFlags||'null'); } catch { return null; } })(),
 				attributes: (() => { try { return JSON.parse(row.attributes||'{}'); } catch { return {}; } })(),
 			}));
 			if (users.length > 0) {
@@ -8437,6 +8442,11 @@ async function 安全分页列出KV(env, prefix, limit = 50, cursor = null) {
 				subscriptionState: row.subscriptionState,
 				traffic: row.traffic || 0, used_traffic: row.used_traffic || 0, expiry: row.expiry || 0,
 				email: row.email || null,
+				registerIp: row.registerIp || null,
+				deviceFp: row.deviceFp || null,
+				riskScore: row.riskScore || 0,
+				riskClusterId: row.riskClusterId || null,
+				riskFlags: (() => { try { return JSON.parse(row.riskFlags||'null'); } catch { return null; } })(),
 				attributes: (() => { try { return JSON.parse(row.attributes||'{}'); } catch { return {}; } })(),
 			}));
 			if (users.length > 0) {
@@ -9320,10 +9330,23 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 		// 扫描识别风险集群
 		if (pathname === '/admin/system/risk/clusters' && request.method === 'GET') {
 			const windowHours = 安全数值(url.searchParams.get('windowHours'), 当前安全配置.riskControl?.clusterWindowHours || 72, 1, 720);
-			const allUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, 200);
-			const enrichedUsers = await Promise.all(allUsers.map(u => 安全构建用户管理信息(运行时, url, u, nowMs, 当前安全配置)));
-		const clusterConfig = 安全深合并(当前安全配置, { riskControl: { clusterWindowHours: windowHours } });
-		const clusters = await 安全风控识别风险集群(运行时, enrichedUsers, clusterConfig, nowMs);
+			const allUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, 5000);
+			// 风控扫描只用轻量字段，不调用完整 安全构建用户管理信息（避免每用户多次 KV 读）
+			const scanCandidates = allUsers.map(u => ({
+				uuid: u.uuid,
+				label: u.label || u.attributes?.account || '',
+				profile: { account: u.label || u.attributes?.account || '', email: u.email || u.attributes?.email || '' },
+				email: u.email || null,
+				registerIp: u.registerIp || u.attributes?.registerIp || '',
+				deviceFp: u.deviceFp || u.attributes?.deviceFp || '',
+				lastIp: u.lastSeenAt ? '' : '',
+				createdAt: u.createdAt || 0,
+				status: u.status || 'active',
+				subscription: { status: u.subscriptionState || u.status || 'active' },
+				attributes: u.attributes || {},
+			}));
+			const clusterConfig = 安全深合并(当前安全配置, { riskControl: { clusterWindowHours: windowHours } });
+			const clusters = await 安全风控识别风险集群(运行时, scanCandidates, clusterConfig, nowMs);
 		const totalFlagged = clusters.reduce((sum, c) => sum + c.size, 0);
 		return 安全JSON响应({
 			success: true,
@@ -9331,7 +9354,7 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 			summary: {
 				clusterCount: clusters.length,
 				flaggedUserCount: totalFlagged,
-				scannedUserCount: enrichedUsers.length,
+				scannedUserCount: scanCandidates.length,
 			},
 			clusters,
 		});
