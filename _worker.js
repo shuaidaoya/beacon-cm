@@ -566,11 +566,11 @@ async function 安全根据账号获取用户(运行时, account) {
 	if (!运行时 || !account) return null;
 	const normalizedAccount = 安全标准化用户唯一键(account);
 	if (!normalizedAccount) return null;
-	const userKeyV2 = 安全生成注册用户键V2(normalizedAccount);
-	const indexed = await 安全KV读取JSON(运行时.env, 安全用户索引键(userKeyV2), null);
-	if (安全UUID有效(indexed?.uuid)) {
-		return await 安全获取用户(运行时, indexed.uuid);
-	}
+		const userKeyV2 = 安全生成注册用户键V2(normalizedAccount);
+		const indexed = await 安全KV读取JSON(运行时.env, 安全用户索引键(userKeyV2), null);
+		if (安全UUID有效(indexed?.uuid) && !indexed.deleted) {
+			return await 安全获取用户(运行时, indexed.uuid);
+		}
 	if (DB实例) {
 		try {
 			const row = await DB实例.prepare('SELECT uuid FROM users WHERE label=? LIMIT 1')
@@ -8125,7 +8125,10 @@ async function 安全删除用户账号(运行时, uuid, meta = {}, nowMs = Date
 		if (userKey) await 安全KV删除键(运行时.env, 安全用户索引键(userKey));
 		// 清理 V2 索引（register:hash:account，不含 email，避免注册时误判已存在）
 		const v2Key = user.label ? 安全生成注册用户键V2(user.label) : null;
-		if (v2Key) await 安全KV删除键(运行时.env, 安全用户索引键(v2Key));
+		if (v2Key) {
+			// 覆盖为墓碑标记（而非删除），跨 KV 节点延迟时注册请求仍能识别
+			await 安全KV写入JSON(运行时.env, 安全用户索引键(v2Key), { deleted: true, uuid: normalizedUuid, deletedAt: nowMs });
+		}
 	await 安全KV删除键(运行时.env, 安全用户木马索引键(sha224(normalizedUuid)));
 	await 安全KV删除键(运行时.env, 安全订阅状态键(normalizedUuid));
 	await 安全KV删除键(运行时.env, 安全活跃封禁键('uuid', normalizedUuid));
