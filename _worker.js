@@ -913,7 +913,7 @@ export default {
 								{ command: 'bnhelp', description: '显示帮助菜单' },
 								{ command: 'bnbind', description: '绑定TG账号（验证码）' },
 								{ command: 'bnwhoami', description: '查看我的TG ID和绑定状态' },
-								{ command: 'bncheckin', description: '每日签到（+1GB流量）' },
+								{ command: 'bncheckin', description: '每日签到领流量' },
 								{ command: 'bntraffic', description: '查询剩余流量' },
 								{ command: 'bnstatus', description: '查询账户状态' },
 							];
@@ -1540,29 +1540,29 @@ if (访问路径 === 'register/login' || 访问路径 === 'register/login/') {
 		}
 	}
 
-	// ── TG 签到 API ──
-	if ((访问路径 === 'api/tg/checkin' || 访问路径 === 'api/tg/checkin/') && request.method === 'POST') {
-		try {
-			const 运行时 = await 创建安全运行时(env);
-			const payload = await 安全解析注册载荷(request);
-			const uuid = payload.uuid;
-			if (!uuid || !安全UUID有效(uuid)) return 认证JSON响应('AUTH_VALIDATION_ERROR', '请提供有效的 UUID。', null, 400);
-			const user = await 安全获取用户(运行时, uuid);
-			if (!user) return 认证JSON响应('AUTH_USER_NOT_FOUND', '用户不存在。', null, 404);
-			const profile = 安全提取用户展示信息(user);
-			if (!profile.tgUserId) return 认证JSON响应('TG_NOT_BOUND', '请先绑定 Telegram 账号。', null, 400);
-			const tgRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(profile.tgUserId), null) || {};
-			const nowMs = Date.now();
-			const today = new Date(nowMs + 8*3600*1000).toISOString().slice(0, 10);
-			const lastCheckinDay = tgRecord.lastCheckIn ? new Date(tgRecord.lastCheckIn + 8*3600*1000).toISOString().slice(0, 10) : null;
-			if (lastCheckinDay === today) return 认证JSON响应('TG_CHECKIN_DUPLICATE', '今日已签到，请明日再来。', { streak: tgRecord.checkInStreak || 0 }, 200);
-			const yesterday = new Date(nowMs + 8*3600*1000 - 86400000).toISOString().slice(0, 10);
-			const streak = (lastCheckinDay === yesterday ? (tgRecord.checkInStreak || 0) + 1 : 1);
-			tgRecord.checkInStreak = streak; tgRecord.lastCheckIn = nowMs; tgRecord.totalCheckIns = (tgRecord.totalCheckIns || 0) + 1; tgRecord.updatedAt = nowMs;
-			await 安全KV写入JSON(运行时.env, 安全TG绑定键(profile.tgUserId), tgRecord);
-			return new Response(JSON.stringify({ code: 'TG_CHECKIN_SUCCESS', data: { streak, totalCheckIns: tgRecord.totalCheckIns, checkedInAt: nowMs } }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
-		} catch (e) { return 认证JSON响应('TG_CHECKIN_FAILED', '签到失败：' + (e?.message || '服务器内部错误'), null, 500); }
-	}
+		// ── TG 签到 API ──
+		if ((访问路径 === 'api/tg/checkin' || 访问路径 === 'api/tg/checkin/') && request.method === 'POST') {
+			try {
+				const 运行时 = await 创建安全运行时(env);
+				const payload = await 安全解析注册载荷(request);
+				const uuid = payload.uuid;
+				if (!uuid || !安全UUID有效(uuid)) return 认证JSON响应('AUTH_VALIDATION_ERROR', '请提供有效的 UUID。', null, 400);
+				const user = await 安全获取用户(运行时, uuid);
+				if (!user) return 认证JSON响应('AUTH_USER_NOT_FOUND', '用户不存在。', null, 404);
+				const profile = 安全提取用户展示信息(user);
+				if (!profile.tgUserId) return 认证JSON响应('TG_NOT_BOUND', '请先绑定 Telegram 账号。', null, 400);
+				const nowMs = Date.now();
+				const 签到结果 = await 安全执行每日签到(运行时, user, { ip: 'tg-api', source: 'tg-api' }, nowMs);
+				if (!签到结果.ok) {
+					return 认证JSON响应(签到结果.code, 签到结果.message, { checkin: 签到结果.checkin }, 签到结果.status);
+				}
+				const info = 签到结果.checkin || {};
+				return new Response(JSON.stringify({
+					code: 'TG_CHECKIN_SUCCESS',
+					data: { rewardGB: 签到结果.rewardGB, rewardBytes: 签到结果.rewardBytes, totalClaimDays: info.totalClaimDays || 1, checkedInAt: nowMs },
+				}), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
+			} catch (e) { return 认证JSON响应('TG_CHECKIN_FAILED', '签到失败：' + (e?.message || '服务器内部错误'), null, 500); }
+		}
 
 	// ── TG 查询流量 API ──
 	if ((访问路径 === 'api/tg/traffic' || 访问路径 === 'api/tg/traffic/') && request.method === 'GET') {
@@ -4516,41 +4516,34 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 	}
 
 	// ── TG 签到命令 ──
-	if (匹配命令('bncheckin')) {
-		if (!tgFrom || !tgFrom.id) return '⚠️ 无法识别用户身份。';
-		const tgUserId = tgFrom.id;
-		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgUserId), null);
-		if (!bindRecord || !bindRecord.uuid) return '⚠️ 您尚未绑定账号，请先在注册页面完成TG验证。';
-		失效用户缓存(bindRecord.uuid);
-		const user = await 安全获取用户(运行时, bindRecord.uuid);
-		if (!user) return '⚠️ 绑定的账号不存在。';
-		if (安全用户已封禁(user)) return '🚫 您的账号已被封禁，无法签到。';
-		const tgRecord = bindRecord;
-		const nowMs = Date.now();
-		const today = new Date(nowMs + 8*3600*1000).toISOString().slice(0, 10);
-		const lastCheckinDay = tgRecord.lastCheckIn ? new Date(tgRecord.lastCheckIn + 8*3600*1000).toISOString().slice(0, 10) : null;
-		if (lastCheckinDay === today) {
-			const total = user.traffic || 0; const used = user.used_traffic || 0; const rem = Math.max(0, total - used);
+		if (匹配命令('bncheckin')) {
+			if (!tgFrom || !tgFrom.id) return '⚠️ 无法识别用户身份。';
+			const tgUserId = tgFrom.id;
+			const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgUserId), null);
+			if (!bindRecord || !bindRecord.uuid) return '⚠️ 您尚未绑定账号，请先在注册页面完成TG验证。';
+			失效用户缓存(bindRecord.uuid);
+			const user = await 安全获取用户(运行时, bindRecord.uuid);
+			if (!user) return '⚠️ 绑定的账号不存在。';
+			if (安全用户已封禁(user)) return '🚫 您的账号已被封禁，无法签到。';
+			const nowMs = Date.now();
+			// 统一使用 安全执行每日签到，与 Web 端共享签到状态
+			const 签到结果 = await 安全执行每日签到(运行时, user, { ip: 'tg-bot', source: 'tg-bot' }, nowMs);
+			if (!签到结果.ok) {
+				if (签到结果.code === 'CHECKIN_ALREADY_CLAIMED') {
+					const info = 签到结果.checkin || {};
+					const total = 签到结果.user?.traffic || user.traffic || 0;
+					const used = 签到结果.user?.used_traffic || user.used_traffic || 0;
+					const fmt = (b) => { if (!b || b <= 0) return '0 B'; const k = 1024, u = ['B','KB','MB','GB','TB']; const i = Math.floor(Math.log(b)/Math.log(k)); return parseFloat((b/Math.pow(k,i)).toFixed(1)) + ' ' + u[i]; };
+					return '✅ 今日已签到！\n\n📊 累计签到：<b>' + (info.totalClaimDays || 0) + '</b> 天\n💎 上次奖励：<b>' + (info.rewardGB || 0) + ' GB</b>\n💎 当前流量：' + fmt(used) + ' / ' + fmt(total);
+				}
+				return '⚠️ ' + 签到结果.message;
+			}
+			const newUser = 签到结果.user;
+			const info = 签到结果.checkin || {};
+			const total = newUser?.traffic || 0;
 			const fmt = (b) => { if (!b || b <= 0) return '0 B'; const k = 1024, u = ['B','KB','MB','GB','TB']; const i = Math.floor(Math.log(b)/Math.log(k)); return parseFloat((b/Math.pow(k,i)).toFixed(1)) + ' ' + u[i]; };
-			return '✅ 今日已签到！\n\n🔥 连续签到：<b>' + (tgRecord.checkInStreak || 0) + '</b> 天\n📊 累计签到：<b>' + (tgRecord.totalCheckIns || 0) + '</b> 次\n💎 当前流量：' + fmt(used) + ' / ' + fmt(total);
+			return '✅ <b>签到成功！恭喜获得 ' + 签到结果.rewardGB + ' GB 流量</b>\n\n📊 累计签到：<b>' + (info.totalClaimDays || 1) + '</b> 天\n💎 当前总流量：' + fmt(total);
 		}
-		const yesterday = new Date(nowMs + 8*3600*1000 - 86400000).toISOString().slice(0, 10);
-		const streak = (lastCheckinDay === yesterday ? (tgRecord.checkInStreak || 0) + 1 : 1);
-		// 签到奖励：+1GB 流量
-		const rewardBytes = 1073741824; // 1GB
-		user.traffic = (user.traffic || 0) + rewardBytes;
-		user.updatedAt = nowMs;
-		await 安全保存用户记录V2(运行时, user);
-		失效用户缓存(user.uuid);
-		tgRecord.checkInStreak = streak;
-		tgRecord.lastCheckIn = nowMs;
-		tgRecord.totalCheckIns = (tgRecord.totalCheckIns || 0) + 1;
-		tgRecord.updatedAt = nowMs;
-		await 安全KV写入JSON(运行时.env, 安全TG绑定键(tgUserId), tgRecord);
-		const total = user.traffic; const used = user.used_traffic || 0;
-		const fmt = (b) => { if (!b || b <= 0) return '0 B'; const k = 1024, u = ['B','KB','MB','GB','TB']; const i = Math.floor(Math.log(b)/Math.log(k)); return parseFloat((b/Math.pow(k,i)).toFixed(1)) + ' ' + u[i]; };
-		return '✅ <b>签到成功恭喜获得 ' + fmt(rewardBytes) + ' 流量</b>\n\n🔥 连续签到：<b>' + streak + '</b> 天\n📊 累计签到：<b>' + tgRecord.totalCheckIns + '</b> 次\n💎 当前总流量：' + fmt(total);
-	}
 
 	// ── TG 查询流量命令 ──
 	if (匹配命令('bntraffic')) {
