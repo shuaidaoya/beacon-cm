@@ -573,7 +573,8 @@ async function 安全根据账号获取用户(运行时, account) {
 		}
 		if (DB实例) {
 			try {
-				const row = await DB实例.prepare('SELECT uuid FROM users WHERE label=? LIMIT 1')
+				// label 大小写不敏感匹配（D1 存储原始大小写，查询用小写标准化值，避免大小写用户名登录查不到）
+				const row = await DB实例.prepare('SELECT uuid FROM users WHERE label = ? COLLATE NOCASE LIMIT 1')
 					.bind(normalizedAccount).first();
 				if (row && 安全UUID有效(row.uuid)) {
 					// 墓碑检查：防止已删除用户的 D1 残留记录导致注册误判
