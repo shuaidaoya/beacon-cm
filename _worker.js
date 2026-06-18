@@ -391,6 +391,7 @@ async function 确保D1用户表() {
 				'riskFlags TEXT DEFAULT NULL',
 				'registerIp TEXT DEFAULT NULL',
 				'deviceFp TEXT DEFAULT NULL',
+				'lastIp TEXT DEFAULT NULL',
 		]) {
 			try { await DB实例.prepare('ALTER TABLE users ADD COLUMN '+col).run(); } catch(e) { /* 列已存在 */ }
 		}
