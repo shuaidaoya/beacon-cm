@@ -6882,7 +6882,12 @@ async function 安全风控标记用户风险(运行时, user, riskInfo = {}) {
 }
 
 // ── 申诉白名单（误封用户申诉解封后标记，后续聚类排除）──
+let 风控白名单缓存 = null;
+let 风控白名单缓存时间 = 0;
 async function 安全风控读取申诉白名单(运行时) {
+	const now = Date.now();
+	// 同一请求内缓存 5 秒，避免循环中重复读 KV
+	if (风控白名单缓存 && (now - 风控白名单缓存时间) < 5000) return 风控白名单缓存;
 	const set = new Set();
 	if (!运行时?.env?.KV) return set;
 	try {
@@ -6891,6 +6896,8 @@ async function 安全风控读取申诉白名单(运行时) {
 			for (const k of Object.keys(data)) if (data[k]) set.add(k.toLowerCase());
 		}
 	} catch (e) {}
+	风控白名单缓存 = set;
+	风控白名单缓存时间 = now;
 	return set;
 }
 async function 安全风控加入申诉白名单(运行时, uuid) {
@@ -6898,6 +6905,7 @@ async function 安全风控加入申诉白名单(运行时, uuid) {
 	const data = await 安全KV读取JSON(运行时.env, 风控申诉白名单键, {});
 	data[String(uuid).toLowerCase()] = true;
 	await 安全KV写入JSON(运行时.env, 风控申诉白名单键, data);
+	风控白名单缓存 = null; // 清缓存
 	return true;
 }
 async function 安全风控移除申诉白名单(运行时, uuid) {
@@ -6905,6 +6913,7 @@ async function 安全风控移除申诉白名单(运行时, uuid) {
 	const data = await 安全KV读取JSON(运行时.env, 风控申诉白名单键, {});
 	delete data[String(uuid).toLowerCase()];
 	await 安全KV写入JSON(运行时.env, 风控申诉白名单键, data);
+	风控白名单缓存 = null; // 清缓存
 	return true;
 }
 
@@ -9308,11 +9317,11 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 	//  风控（薅羊毛防治）管理 API
 	// ════════════════════════════════════════════════════════════════
 
-	// 扫描识别风险集群
-	if (pathname === '/admin/system/risk/clusters' && request.method === 'GET') {
-		const windowHours = 安全数值(url.searchParams.get('windowHours'), 当前安全配置.riskControl?.clusterWindowHours || 72, 1, 720);
-		const allUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, 5000);
-		const enrichedUsers = await Promise.all(allUsers.map(u => 安全构建用户管理信息(运行时, url, u, nowMs, 当前安全配置)));
+		// 扫描识别风险集群
+		if (pathname === '/admin/system/risk/clusters' && request.method === 'GET') {
+			const windowHours = 安全数值(url.searchParams.get('windowHours'), 当前安全配置.riskControl?.clusterWindowHours || 72, 1, 720);
+			const allUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, 200);
+			const enrichedUsers = await Promise.all(allUsers.map(u => 安全构建用户管理信息(运行时, url, u, nowMs, 当前安全配置)));
 		const clusterConfig = 安全深合并(当前安全配置, { riskControl: { clusterWindowHours: windowHours } });
 		const clusters = await 安全风控识别风险集群(运行时, enrichedUsers, clusterConfig, nowMs);
 		const totalFlagged = clusters.reduce((sum, c) => sum + c.size, 0);
