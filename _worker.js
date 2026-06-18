@@ -9329,7 +9329,7 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 
 		// 扫描识别风险集群
 		if (pathname === '/admin/system/risk/clusters' && request.method === 'GET') {
-			const windowHours = 安全数值(url.searchParams.get('windowHours'), 当前安全配置.riskControl?.clusterWindowHours || 72, 1, 720);
+			const windowHours = 安全数值(url.searchParams.get('windowHours'), 当前配置.riskControl?.clusterWindowHours || 72, 1, 720);
 			const allUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, 5000);
 			// 风控扫描只用轻量字段，不调用完整 安全构建用户管理信息（避免每用户多次 KV 读）
 			const scanCandidates = allUsers.map(u => ({
@@ -9345,7 +9345,7 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 				subscription: { status: u.subscriptionState || u.status || 'active' },
 				attributes: u.attributes || {},
 			}));
-			const clusterConfig = 安全深合并(当前安全配置, { riskControl: { clusterWindowHours: windowHours } });
+			const clusterConfig = 安全深合并(当前配置, { riskControl: { clusterWindowHours: windowHours } });
 			const clusters = await 安全风控识别风险集群(运行时, scanCandidates, clusterConfig, nowMs);
 		const totalFlagged = clusters.reduce((sum, c) => sum + c.size, 0);
 		return 安全JSON响应({
