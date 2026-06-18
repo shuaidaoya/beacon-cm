@@ -1298,11 +1298,9 @@ export default {
 					const 设备指纹2 = 安全风控计算设备指纹(访问IP, UA);
 					const 风控标记2 = 安全风控提取账号风险标记({ profile: { account: pending.account, email: pending.email }, traffic: user.traffic, used_traffic: user.used_traffic, attributes: user.attributes }, 当前安全配置);
 					await 安全风控标记用户风险(运行时, user, { registerIp: 访问IP, deviceFp: 设备指纹2, flags: 风控标记2 });
-					// KV同步写入（即时生效），D1异步写入（不阻塞注册跳转）
-					await 安全KV写入JSON(运行时.env, 安全用户前缀 + user.uuid, user);
-					if (DB实例) {
-						安全保存用户记录V2(运行时, user).catch(e => console.error('[TG注册] D1异步写入失败:', e.message));
-					}
+					// 同步写入用户记录 + V2 索引（KV+D1），确保注册完成后立即可登录
+					// 注意：必须 await，否则 V2 索引未写入时登录查重会查不到用户
+					await 安全保存用户记录V2(运行时, user);
 					await 安全KV写入JSON(运行时.env, 安全TG绑定键(verifyRecord.tgUserId), {
 						uuid: user.uuid,
 						tgUserId: verifyRecord.tgUserId,
