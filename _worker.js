@@ -433,6 +433,7 @@ function 用户记录转D1行(user) {
 			riskFlags: user.riskFlags ? JSON.stringify(user.riskFlags) : null,
 			registerIp: user.registerIp || user.attributes?.registerIp || null,
 			deviceFp: user.deviceFp || user.attributes?.deviceFp || null,
+			lastIp: user.lastIp || null,
 		attributes: JSON.stringify(user.attributes || {}),
 	};
 }
@@ -7461,9 +7462,9 @@ async function 安全KV写入JSON(env, key, value, expirationTtl) {
 	if (DB实例 && key.startsWith(安全用户前缀) && value && typeof value === 'object') {
 		try {
 			const row = 用户记录转D1行(value);
-			await DB实例.prepare(`INSERT OR REPLACE INTO users (uuid,userKey,label,source,status,createdAt,updatedAt,lastSeenAt,bannedAt,bannedReason,subscriptionToken,subscriptionTokenUpdatedAt,subscriptionState,traffic,used_traffic,expiry,passwordHash,passwordSet,email,passwordUpdatedAt,emailLoginDeadline,attributes)
-				VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)`)
-				.bind(row.uuid, row.userKey, row.label, row.source, row.status, row.createdAt, row.updatedAt, row.lastSeenAt, row.bannedAt, row.bannedReason, row.subscriptionToken, row.subscriptionTokenUpdatedAt, row.subscriptionState, row.traffic, row.used_traffic, row.expiry, row.passwordHash, row.passwordSet, row.email, row.passwordUpdatedAt, row.emailLoginDeadline, row.attributes)
+await DB实例.prepare(`INSERT OR REPLACE INTO users (uuid,userKey,label,source,status,createdAt,updatedAt,lastSeenAt,bannedAt,bannedReason,subscriptionToken,subscriptionTokenUpdatedAt,subscriptionState,traffic,used_traffic,expiry,passwordHash,passwordSet,email,passwordUpdatedAt,emailLoginDeadline,attributes,lastIp,registerIp,deviceFp,riskScore,riskClusterId,riskFlags)
+					VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)`)
+					.bind(row.uuid, row.userKey, row.label, row.source, row.status, row.createdAt, row.updatedAt, row.lastSeenAt, row.bannedAt, row.bannedReason, row.subscriptionToken, row.subscriptionTokenUpdatedAt, row.subscriptionState, row.traffic, row.used_traffic, row.expiry, row.passwordHash, row.passwordSet, row.email, row.passwordUpdatedAt, row.emailLoginDeadline, row.attributes, row.lastIp, row.registerIp, row.deviceFp, row.riskScore, row.riskClusterId, row.riskFlags)
 				.run();
 		} catch(e) { /* D1 失败 → 回退 KV */ }
 	}
@@ -8371,6 +8372,7 @@ async function 安全列出KV记录(env, prefix, limit = 50) {
 				email: row.email || null,
 				registerIp: row.registerIp || null,
 				deviceFp: row.deviceFp || null,
+				lastIp: row.lastIp || null,
 				riskScore: row.riskScore || 0,
 				riskClusterId: row.riskClusterId || null,
 				riskFlags: (() => { try { return JSON.parse(row.riskFlags||'null'); } catch { return null; } })(),
@@ -8437,6 +8439,7 @@ async function 安全分页列出KV(env, prefix, limit = 50, cursor = null) {
 				email: row.email || null,
 				registerIp: row.registerIp || null,
 				deviceFp: row.deviceFp || null,
+				lastIp: row.lastIp || null,
 				riskScore: row.riskScore || 0,
 				riskClusterId: row.riskClusterId || null,
 				riskFlags: (() => { try { return JSON.parse(row.riskFlags||'null'); } catch { return null; } })(),
