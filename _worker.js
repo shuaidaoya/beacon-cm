@@ -913,7 +913,7 @@ export default {
 								{ command: 'bnhelp', description: '显示帮助菜单' },
 								{ command: 'bnbind', description: '绑定TG账号（验证码）' },
 								{ command: 'bnwhoami', description: '查看我的TG ID和绑定状态' },
-								{ command: 'bncheckin', description: '每日签到领流量' },
+								{ command: 'bncheckin', description: '每日签到领 2~10GB 流量' },
 								{ command: 'bntraffic', description: '查询剩余流量' },
 								{ command: 'bnstatus', description: '查询账户状态' },
 							];
@@ -6223,8 +6223,8 @@ function 安全构建签到信息(user = {}, nowMs = Date.now()) {
 	return {
 		enabled: eligible,
 		eligible,
-		minRewardGB: 2,
-		maxRewardGB: 20,
+	minRewardGB: 2,
+			maxRewardGB: 10,
 		todayKey,
 		message: eligible ? '' : '无限制总配额用户无需签到。',
 		claimedToday: dailyCheckin.lastDateKey === todayKey,
@@ -8066,7 +8066,7 @@ async function 安全执行每日签到(运行时, user, meta = {}, nowMs = Date
 	if (当前签到信息.claimedToday) {
 		return { ok: false, code: 'CHECKIN_ALREADY_CLAIMED', message: '今天已经签到过了，明天再来领取吧。', status: 409, user, checkin: 当前签到信息 };
 	}
-	const rewardGB = 2 + Math.floor(Math.random() * 19);
+	const rewardGB = 2 + Math.floor(Math.random() * 9);
 	const rewardBytes = rewardGB * 1024 * 1024 * 1024;
 	const attributes = user.attributes && typeof user.attributes === 'object' ? { ...user.attributes } : {};
 	const dailyCheckin = attributes.dailyCheckin && typeof attributes.dailyCheckin === 'object' ? { ...attributes.dailyCheckin } : {};
