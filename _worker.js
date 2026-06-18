@@ -171,6 +171,10 @@ const 安全状态前缀 = 'sys:state:';
 const 安全订阅状态前缀 = 'sys:subscription-state:';
 const 安全注册日志前缀 = 'sys:reglog:';
 const 安全注册定时任务前缀 = 'sys:regtask:';
+// ===== 风控（薅羊毛防治）相关 KV 键前缀 =====
+const 风控注册计数前缀 = 'sys:risk:regfp:';     // 注册指纹计数器（IP+设备指纹维度），TTL 24h
+const 风控集群报告前缀 = 'sys:risk:report:';     // 违规账号统计报表，TTL 90 天
+const 风控申诉白名单键 = 'sys:risk:whitelist';   // 误封申诉白名单集合（uuid → true）
 // ===== D1 数据库 ===== (用户管理 KV → D1 迁移)
 let DB实例 = null;
 function 初始化D1(env) { if (env.DB && typeof env.DB.prepare === 'function') DB实例 = env.DB; }
@@ -381,6 +385,12 @@ async function 确保D1用户表() {
 				'email TEXT DEFAULT NULL',
 				'passwordUpdatedAt INTEGER DEFAULT 0',
 				'emailLoginDeadline INTEGER DEFAULT 0',
+				// ── 风控（薅羊毛防治）特征字段 ──
+				'riskScore INTEGER DEFAULT 0',
+				'riskClusterId TEXT DEFAULT NULL',
+				'riskFlags TEXT DEFAULT NULL',
+				'registerIp TEXT DEFAULT NULL',
+				'deviceFp TEXT DEFAULT NULL',
 		]) {
 			try { await DB实例.prepare('ALTER TABLE users ADD COLUMN '+col).run(); } catch(e) { /* 列已存在 */ }
 		}
@@ -388,6 +398,10 @@ async function 确保D1用户表() {
 		await DB实例.prepare(`CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)`).run();
 			try { await DB实例.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_label_unique ON users(label)').run(); } catch(e) {}
 			try { await DB实例.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users(email)').run(); } catch(e) {}
+			// 风控聚类查询索引
+			try { await DB实例.prepare('CREATE INDEX IF NOT EXISTS idx_users_risk_cluster ON users(riskClusterId)').run(); } catch(e) {}
+			try { await DB实例.prepare('CREATE INDEX IF NOT EXISTS idx_users_register_ip ON users(registerIp)').run(); } catch(e) {}
+			try { await DB实例.prepare('CREATE INDEX IF NOT EXISTS idx_users_device_fp ON users(deviceFp)').run(); } catch(e) {}
 	} catch(e) { console.error('D1 建表失败:', e.message); }
 }
 function 用户记录转D1行(user) {
@@ -413,6 +427,12 @@ function 用户记录转D1行(user) {
 			email: user.email || null,
 			passwordUpdatedAt: user.passwordUpdatedAt || 0,
 			emailLoginDeadline: user.emailLoginDeadline || 0,
+			// 风控特征字段（riskScore/riskClusterId/riskFlags/registerIp/deviceFp）
+			riskScore: user.riskScore || 0,
+			riskClusterId: user.riskClusterId || null,
+			riskFlags: user.riskFlags ? JSON.stringify(user.riskFlags) : null,
+			registerIp: user.registerIp || user.attributes?.registerIp || null,
+			deviceFp: user.deviceFp || user.attributes?.deviceFp || null,
 		attributes: JSON.stringify(user.attributes || {}),
 	};
 }
@@ -952,6 +972,27 @@ export default {
 					await 安全记录注册日志(运行时, 'validation_failed', null, 访问IP, UA, { errors: 校验结果.errors }, 安全当前时间(env));
 					return 认证JSON响应('AUTH_VALIDATION_ERROR', '请填写合法的用户名、邮箱和密码。', { errors: 校验结果.errors }, 400);
 				}
+				// ── 风控注册拦截：同 IP/设备指纹 24h 内注册尝试数超阈值 ──
+				const 风控检查 = await 安全风控检查注册(运行时, 访问IP, UA, 当前安全配置);
+				if (风控检查.action === 'block') {
+					await 安全记录注册日志(运行时, 'risk_blocked', null, 访问IP, UA, { reason: 'register_ip_block', count: 风控检查.count, threshold: 风控检查.threshold, fp: 风控检查.fp, account: 校验结果.account }, 安全当前时间(env));
+					return 认证JSON响应('AUTH_RISK_REGISTRATION_BLOCKED', '检测到该网络环境在短时间内发起了过多注册请求，已被风控系统拦截。如有疑问请联系管理员。', {
+						reason: 'register_ip_block',
+						count: 风控检查.count,
+						threshold: 风控检查.threshold,
+					}, 403);
+				}
+				if (风控检查.action === 'challenge') {
+					// 触发人机验证：要求走 TG 验证流程（复用 verify-tg）
+					await 安全记录注册日志(运行时, 'risk_challenge', null, 访问IP, UA, { reason: 'register_ip_challenge', count: 风控检查.count, threshold: 风控检查.threshold, fp: 风控检查.fp, account: 校验结果.account }, 安全当前时间(env));
+					return 认证JSON响应('AUTH_RISK_CHALLENGE_REQUIRED', '该网络环境注册频繁，需通过 Telegram 人机验证后才能继续注册。', {
+						reason: 'register_ip_challenge',
+						count: 风控检查.count,
+						threshold: 风控检查.threshold,
+						nextStep: 'verify-tg',
+						account: 校验结果.account,
+					}, 449);
+				}
 				// 三重唯一性校验：用户名、邮箱
 				const 用户名已存在 = await 安全根据账号获取用户(运行时, 校验结果.account);
 				if (用户名已存在) {
@@ -1045,8 +1086,12 @@ export default {
 				};
 				if (校验结果.email) newUserPayload.email = 校验结果.email;
 				const user = await 安全创建用户(运行时, newUserPayload, 访问IP, UA, 安全当前时间(env));
+				// ── 风控：写入注册 IP/设备指纹 + 实时风险标记 ──
+				const 设备指纹 = 安全风控计算设备指纹(访问IP, UA);
+				const 风控标记 = 安全风控提取账号风险标记({ profile: { account: labelValue, email: 校验结果.email }, traffic: user.traffic, used_traffic: user.used_traffic, attributes: user.attributes || {} }, 当前安全配置);
+				await 安全风控标记用户风险(运行时, user, { registerIp: 访问IP, deviceFp: 设备指纹, flags: 风控标记 });
 				await 安全保存用户记录V2(运行时, user);
-				await 安全记录注册日志(运行时, 'success', user.uuid, 访问IP, UA, { account: 校验结果.account }, 安全当前时间(env));
+				await 安全记录注册日志(运行时, 'success', user.uuid, 访问IP, UA, { account: 校验结果.account, riskFlags: 风控标记, deviceFp: 设备指纹 }, 安全当前时间(env));
 				return 认证JSON响应('AUTH_SIGNUP_SUCCESS', '注册成功，已切换到登录模式，请直接登录。', {
 					account: 校验结果.account,
 					nextMode: 'signin',
@@ -1245,6 +1290,10 @@ export default {
 					user.attributes.tgUsername = verifyRecord.tgUsername;
 					user.attributes.tgFirstName = verifyRecord.tgFirstName || null;
 					user.attributes.tgLastName = verifyRecord.tgLastName || null;
+					// ── 风控：写入注册 IP/设备指纹 + 实时风险标记（TG 已验证，noTgBinding 不会触发）──
+					const 设备指纹2 = 安全风控计算设备指纹(访问IP, UA);
+					const 风控标记2 = 安全风控提取账号风险标记({ profile: { account: pending.account, email: pending.email }, traffic: user.traffic, used_traffic: user.used_traffic, attributes: user.attributes }, 当前安全配置);
+					await 安全风控标记用户风险(运行时, user, { registerIp: 访问IP, deviceFp: 设备指纹2, flags: 风控标记2 });
 					// KV同步写入（即时生效），D1异步写入（不阻塞注册跳转）
 					await 安全KV写入JSON(运行时.env, 安全用户前缀 + user.uuid, user);
 					if (DB实例) {
@@ -5994,6 +6043,23 @@ function 获取默认安全配置() {
 			verifyTimeout: 600,
 			syncEnabled: false,
 		},
+		riskControl: {
+			enabled: true,
+			// 相似度阈值：超过则两账号归入同一候选集群
+			accountSimilarityThreshold: 0.6,
+			// 用户名字符集 Jaccard 阈值（薅羊毛账号字符表高度受限）
+			usernameCharsetJaccardThreshold: 0.5,
+			// 集群最小规模（低于此规模不判定为风险集群，控制误封）
+			clusterMinSize: 3,
+			// 集群识别回溯窗口（小时）
+			clusterWindowHours: 72,
+			// 注册拦截：同 IP/设备指纹 24h 内尝试数
+			registerIpChallengeThreshold: 3,  // 超过触发人机验证
+			registerIpBlockThreshold: 5,      // 超过直接拦截
+			registerWindowHours: 24,
+			// 可疑免费邮箱域名（仅作风险加分项，不直接拦截）
+			suspiciousEmailDomains: ['hotmail.com', 'outlook.com'],
+		},
 	};
 }
 
@@ -6110,6 +6176,26 @@ function 安全标准化配置(原始配置 = {}, env = {}) {
 	merged.abuse.pathSequence.sensitivePrefixes = Array.isArray(merged.abuse.pathSequence.sensitivePrefixes) ? [...new Set([...merged.abuse.pathSequence.sensitivePrefixes.map(item => String(item).toLowerCase()).filter(Boolean), '/admin', '/login'])] : ['/admin', '/login'];
 	merged.policy.sensitivePrefixes = Array.isArray(merged.policy.sensitivePrefixes) ? merged.policy.sensitivePrefixes.map(item => String(item).toLowerCase()) : ['/admin', '/login'];
 	merged.policy.observePrefixes = Array.isArray(merged.policy.observePrefixes) ? merged.policy.observePrefixes.map(item => String(item).toLowerCase()) : ['/sub', '/version'];
+	// ── 风控（薅羊毛防治）配置标准化 ──
+	merged.riskControl = 安全深合并(获取默认安全配置().riskControl, merged.riskControl || {});
+	merged.riskControl.enabled = 安全布尔值(merged.riskControl.enabled, true);
+	merged.riskControl.accountSimilarityThreshold = 安全数值(merged.riskControl.accountSimilarityThreshold, 0.6, 0, 1);
+	merged.riskControl.usernameCharsetJaccardThreshold = 安全数值(merged.riskControl.usernameCharsetJaccardThreshold, 0.5, 0, 1);
+	merged.riskControl.clusterMinSize = 安全数值(merged.riskControl.clusterMinSize, 3, 2, 50);
+	merged.riskControl.clusterWindowHours = 安全数值(merged.riskControl.clusterWindowHours, 72, 1, 720);
+	merged.riskControl.registerIpChallengeThreshold = 安全数值(merged.riskControl.registerIpChallengeThreshold, 3, 1, 100);
+	merged.riskControl.registerIpBlockThreshold = 安全数值(merged.riskControl.registerIpBlockThreshold, 5, 1, 100);
+	merged.riskControl.registerWindowHours = 安全数值(merged.riskControl.registerWindowHours, 24, 1, 168);
+	merged.riskControl.suspiciousEmailDomains = Array.isArray(merged.riskControl.suspiciousEmailDomains)
+		? [...new Set(merged.riskControl.suspiciousEmailDomains.map(d => String(d).trim().toLowerCase()).filter(Boolean))]
+		: ['hotmail.com', 'outlook.com'];
+	if (merged.riskControl.registerIpBlockThreshold < merged.riskControl.registerIpChallengeThreshold) {
+		merged.riskControl.registerIpBlockThreshold = merged.riskControl.registerIpChallengeThreshold + 1;
+	}
+	if ('SECURITY_RISK_ENABLED' in env) merged.riskControl.enabled = 安全布尔值(env.SECURITY_RISK_ENABLED, merged.riskControl.enabled);
+	if ('SECURITY_RISK_SIMILARITY_THRESHOLD' in env) merged.riskControl.accountSimilarityThreshold = 安全数值(env.SECURITY_RISK_SIMILARITY_THRESHOLD, merged.riskControl.accountSimilarityThreshold, 0, 1);
+	if ('SECURITY_RISK_CLUSTER_MIN_SIZE' in env) merged.riskControl.clusterMinSize = 安全数值(env.SECURITY_RISK_CLUSTER_MIN_SIZE, merged.riskControl.clusterMinSize, 2, 50);
+	if ('SECURITY_RISK_REGISTER_IP_BLOCK_THRESHOLD' in env) merged.riskControl.registerIpBlockThreshold = 安全数值(env.SECURITY_RISK_REGISTER_IP_BLOCK_THRESHOLD, merged.riskControl.registerIpBlockThreshold, 1, 100);
 	return 安全应用阈值下限(merged);
 }
 
@@ -6492,6 +6578,390 @@ async function 安全取消所有未执行注册定时任务(运行时, nowMs) {
 		if (result) 已取消.push(result.taskId);
 	}
 	return { 数量: 已取消.length, 任务列表: 已取消 };
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  风控（薅羊毛防治）核心模块
+//  覆盖：特征提取 → 相似度算法 → 风险集群识别 → 注册拦截 → 批量处置 → 申诉白名单
+//  兼容现有账号管理流程（ban/restore/delete/set-traffic/reset-subscription）
+// ════════════════════════════════════════════════════════════════════════
+
+// ── 设备指纹：对 IP + UA 做稳定哈希，用于注册聚类（不强求唯一性，关注一致性）──
+function 安全风控计算设备指纹(ip, ua) {
+	const raw = String(ip || '') + '|' + String(ua || '').toLowerCase().slice(0, 200);
+	return 安全FNV1a(raw);
+}
+
+// ── 用户名特征：字符表/长度/是否含数字/大写/特殊符号 ──
+function 安全风控提取用户名特征(username) {
+	const s = String(username || '').trim();
+	const charset = new Set();
+	let hasDigit = false, hasUpper = false, hasLower = false, hasSpecial = false;
+	for (const ch of s) {
+		charset.add(ch);
+		if (/[0-9]/.test(ch)) hasDigit = true;
+		else if (/[A-Z]/.test(ch)) hasUpper = true;
+		else if (/[a-z]/.test(ch)) hasLower = true;
+		else hasSpecial = true;
+	}
+	return { raw: s, length: s.length, charset, charSetSize: charset.size, hasDigit, hasUpper, hasLower, hasSpecial };
+}
+
+// ── 邮箱特征：local 部分 + 域名 ──
+function 安全风控提取邮箱特征(email) {
+	const s = String(email || '').trim().toLowerCase();
+	const atIdx = s.indexOf('@');
+	if (atIdx < 0) return { raw: s, local: '', domain: '', localCharset: new Set() };
+	const local = s.slice(0, atIdx);
+	const domain = s.slice(atIdx + 1);
+	const localCharset = new Set();
+	for (const ch of local) localCharset.add(ch);
+	return { raw: s, local, domain, localCharset };
+}
+
+// ── Jaccard 系数（集合重合度，0-1）──
+function 安全风控字符集重合度(setA, setB) {
+	if (!setA || !setB || setA.size === 0 || setB.size === 0) return 0;
+	let inter = 0;
+	for (const ch of setA) if (setB.has(ch)) inter++;
+	const union = setA.size + setB.size - inter;
+	return union === 0 ? 0 : inter / union;
+}
+
+// ── Levenshtein 编辑距离（用户名长度≤16，O(n²) 可承受）──
+function 安全风控编辑距离(a, b) {
+	const s1 = String(a || '');
+	const s2 = String(b || '');
+	if (s1 === s2) return 0;
+	const m = s1.length, n = s2.length;
+	if (m === 0) return n;
+	if (n === 0) return m;
+	let prev = new Array(n + 1);
+	let curr = new Array(n + 1);
+	for (let j = 0; j <= n; j++) prev[j] = j;
+	for (let i = 1; i <= m; i++) {
+		curr[0] = i;
+		for (let j = 1; j <= n; j++) {
+			const cost = s1.charCodeAt(i - 1) === s2.charCodeAt(j - 1) ? 0 : 1;
+			curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+		}
+		[prev, curr] = [curr, prev];
+	}
+	return prev[n];
+}
+
+// ── 用户名相似度：编辑距离归一化 + 字符集 Jaccard 加权 ──
+function 安全风控用户名相似度(featA, featB) {
+	if (!featA || !featB || !featA.length || !featB.length) return 0;
+	const maxLen = Math.max(featA.length, featB.length);
+	const dist = 安全风控编辑距离(featA.raw, featB.raw);
+	const editSim = 1 - dist / maxLen;                       // 0-1
+	const charsetJaccard = 安全风控字符集重合度(featA.charset, featB.charset); // 0-1
+	// 编辑距离权重 0.6，字符集重合度权重 0.4（薅羊毛账号字符表高度受限，重合度强信号）
+	return editSim * 0.6 + charsetJaccard * 0.4;
+}
+
+// ── 账号综合相似度（用户名 + 邮箱 + IP/设备指纹 加权）──
+//  针对薅羊毛账号"同字符表乱序排列"特征，重权字符集重合度而非编辑距离
+//  权重：用户名字符集 Jaccard 0.25 / 邮箱 local 字符集 Jaccard 0.25 / 邮箱域名同属可疑集 0.18
+//       / 用户名↔邮箱local 字符集相互包含(脚本复用字符表) 0.17 / IP或设备指纹一致 0.15
+function 安全风控账号相似度(userA, userB, riskConfig) {
+	if (!userA || !userB) return 0;
+	const uA = userA.profile?.account || userA.label || userA.attributes?.account || '';
+	const uB = userB.profile?.account || userB.label || userB.attributes?.account || '';
+	const eA = userA.profile?.email || userA.email || userA.attributes?.email || '';
+	const eB = userB.profile?.email || userB.email || userB.attributes?.email || '';
+	const featA = 安全风控提取用户名特征(uA);
+	const featB = 安全风控提取用户名特征(uB);
+	const emailA = 安全风控提取邮箱特征(eA);
+	const emailB = 安全风控提取邮箱特征(eB);
+
+	// 用户名字符集 Jaccard（核心信号：薅羊毛账号共享受限字符表）
+	const usernameCharset = 安全风控字符集重合度(featA.charset, featB.charset);
+	// 邮箱 local 部分字符集 Jaccard
+	const emailLocalCharset = 安全风控字符集重合度(emailA.localCharset, emailB.localCharset);
+	// 邮箱域名：完全一致 1.0，同属可疑免费邮箱集 0.5，否则 0
+	const 可疑域集 = (riskConfig?.suspiciousEmailDomains) || ['hotmail.com', 'outlook.com'];
+	let domainScore = 0;
+	if (emailA.domain && emailB.domain) {
+		if (emailA.domain === emailB.domain) domainScore = 1;
+		else if (可疑域集.includes(emailA.domain) && 可疑域集.includes(emailB.domain)) domainScore = 0.5;
+	}
+	// 脚本复用字符表特征：A 的用户名字符集 ⊆ A 的邮箱 local，且 B 同样如此
+	// （薅羊毛脚本通常把用户名当邮箱 local 或共用字符表乱序生成）
+	// 仅当邮箱域名同属可疑集时计入（避免误伤 mike@gmail.com 这类真实用户名作邮箱的正常用法）
+	const aUserSubsetEmail = featA.charset.size > 0 && emailA.localCharset.size > 0 &&
+		[...featA.charset].every(ch => emailA.localCharset.has(ch));
+	const bUserSubsetEmail = featB.charset.size > 0 && emailB.localCharset.size > 0 &&
+		[...featB.charset].every(ch => emailB.localCharset.has(ch));
+	const 复用字符表 = (aUserSubsetEmail && bUserSubsetEmail && domainScore > 0) ? 1 : 0;
+
+	const ipA = userA.registerIp || userA.lastIp || userA.attributes?.registerIp || '';
+	const ipB = userB.registerIp || userB.lastIp || userB.attributes?.registerIp || '';
+	const fpA = userA.deviceFp || userA.attributes?.deviceFp || '';
+	const fpB = userB.deviceFp || userB.attributes?.deviceFp || '';
+	let ipFpScore = 0;
+	if (ipA && ipB && ipA === ipB) ipFpScore = 1;
+	else if (fpA && fpB && fpA === fpB) ipFpScore = 1;
+
+	return usernameCharset * 0.25 + emailLocalCharset * 0.25 + domainScore * 0.18 + 复用字符表 * 0.17 + ipFpScore * 0.15;
+}
+
+// ── 单账号风险标记（用于 riskFlags）──
+function 安全风控提取账号风险标记(user, config) {
+	const flags = {};
+	const u = user.profile?.account || user.label || user.attributes?.account || '';
+	const e = user.profile?.email || user.email || user.attributes?.email || '';
+	const feat = 安全风控提取用户名特征(u);
+	const email = 安全风控提取邮箱特征(e);
+
+	// 用户名字符表受限：≤6 种字符 且 无数字 且 无大写 且 无特殊符号（薅羊毛强指纹）
+	if (feat.charSetSize > 0 && feat.charSetSize <= 6 && !feat.hasDigit && !feat.hasUpper && !feat.hasSpecial) {
+		flags.usernamePattern = true;
+	}
+	// 用户名与邮箱 local 共享字符集（脚本批量生成特征）
+	if (feat.charset.size > 0 && email.localCharset.size > 0) {
+		const j = 安全风控字符集重合度(feat.charset, email.localCharset);
+		if (j >= (config?.usernameCharsetJaccardThreshold || 0.5)) flags.usernameEmailCharsetOverlap = true;
+	}
+	// 可疑免费邮箱域名
+	if (email.domain && (config?.suspiciousEmailDomains || []).includes(email.domain)) {
+		flags.suspiciousEmailDomain = email.domain;
+	}
+	// 低流量（初始配额几乎未消耗）
+	const used = user.used_traffic || 0;
+	const total = user.traffic || 0;
+	if (total > 0 && used < 10 * 1024 * 1024) flags.lowTraffic = true; // < 10MB
+	// 未绑定 TG
+	if (!(user.attributes?.tgUserId || user.tgUserId)) flags.noTgBinding = true;
+	return flags;
+}
+
+// ── 并查集（Union-Find），用于风险集群聚类 ──
+function 安全风控创建并查集() {
+	const parent = {};
+	const find = (x) => { if (!(x in parent)) parent[x] = x; while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+	const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb; };
+	return { find, union, parent };
+}
+
+// ── 风险集群识别：对近期新注册账号两两计算相似度，超阈值归入同一集群 ──
+//  返回 [{ clusterId, members: [userUuid...], avgSimilarity, maxSimilarity, riskScore, flags }]
+async function 安全风控识别风险集群(运行时, users, config, nowMs) {
+	const rc = config?.riskControl || 获取默认安全配置().riskControl;
+	if (!rc.enabled) return [];
+	if (!Array.isArray(users) || users.length < (rc.clusterMinSize || 3)) return [];
+
+	const windowMs = (rc.clusterWindowHours || 72) * 3600 * 1000;
+	const cutoff = (nowMs || Date.now()) - windowMs;
+
+	// 仅聚类近期新注册账号（排除已申诉白名单）
+	const whitelist = await 安全风控读取申诉白名单(运行时);
+	const candidates = users.filter(u => {
+		const created = u.createdAt || u.lifecycle?.createdAt || 0;
+		if (!created || created < cutoff) return false;
+		if (whitelist.has(String(u.uuid || '').toLowerCase())) return false;
+		return true;
+	});
+	if (candidates.length < (rc.clusterMinSize || 3)) return [];
+
+	const uf = 安全风控创建并查集();
+	const pairScores = {}; // 'uuidA|uuidB' → score
+	const threshold = rc.accountSimilarityThreshold || 0.6;
+
+	for (let i = 0; i < candidates.length; i++) {
+		for (let j = i + 1; j < candidates.length; j++) {
+			const a = candidates[i], b = candidates[j];
+			const score = 安全风控账号相似度(a, b, rc);
+			if (score >= threshold) {
+				uf.union(a.uuid, b.uuid);
+				const key = [a.uuid, b.uuid].sort().join('|');
+				pairScores[key] = score;
+			}
+		}
+	}
+
+	// 按 root 分组
+	const groups = {};
+	for (const u of candidates) {
+		const root = uf.find(u.uuid);
+		if (!groups[root]) groups[root] = [];
+		groups[root].push(u);
+	}
+
+	const clusters = [];
+	for (const [root, members] of Object.entries(groups)) {
+		if (members.length < (rc.clusterMinSize || 3)) continue;
+		// 计算集群内平均/最大相似度
+		let sum = 0, count = 0, max = 0;
+		for (let i = 0; i < members.length; i++) {
+			for (let j = i + 1; j < members.length; j++) {
+				const key = [members[i].uuid, members[j].uuid].sort().join('|');
+				const s = pairScores[key];
+				if (s != null) { sum += s; count++; if (s > max) max = s; }
+			}
+		}
+		const avg = count > 0 ? sum / count : 0;
+		// 风险评分：集群规模 * 20 + 平均相似度 * 40，封顶 100
+		const riskScore = Math.min(100, Math.round(members.length * 20 + avg * 40));
+		// 合并成员风险标记
+		const mergedFlags = {};
+		for (const m of members) {
+			const f = 安全风控提取账号风险标记(m, rc);
+			for (const k of Object.keys(f)) mergedFlags[k] = f[k];
+		}
+		const clusterId = 'risk-' + 安全FNV1a(root).slice(0, 12);
+		clusters.push({
+			clusterId,
+			members: members.map(m => m.uuid),
+			memberDetails: members.map(m => ({
+				uuid: m.uuid,
+				account: m.profile?.account || m.label || '',
+				email: m.profile?.email || m.email || '',
+				registerIp: m.registerIp || m.lastIp || '',
+				deviceFp: m.deviceFp || '',
+				createdAt: m.createdAt || m.lifecycle?.createdAt || 0,
+				status: m.subscription?.status || m.status || 'active',
+			})),
+			size: members.length,
+			avgSimilarity: Number(avg.toFixed(3)),
+			maxSimilarity: Number(max.toFixed(3)),
+			riskScore,
+			flags: mergedFlags,
+		});
+	}
+	// 按规模降序
+	clusters.sort((a, b) => b.size - a.size || b.riskScore - a.riskScore);
+	return clusters;
+}
+
+// ── 注册拦截：检查同 IP/设备指纹 24h 注册尝试数 ──
+//  返回 { action: 'allow' | 'challenge' | 'block', count, threshold, fp }
+async function 安全风控检查注册(运行时, ip, ua, config) {
+	const rc = config?.riskControl || 获取默认安全配置().riskControl;
+	if (!rc.enabled) return { action: 'allow', count: 0, fp: null };
+	if (!运行时?.env?.KV || !ip) return { action: 'allow', count: 0, fp: null };
+
+	const fp = 安全风控计算设备指纹(ip, ua);
+	const key = 风控注册计数前缀 + fp;
+	const ttl = (rc.registerWindowHours || 24) * 3600;
+	const now = Date.now();
+	let record = await 安全KV读取JSON(运行时.env, key, { count: 0, firstAt: now, attempts: [] });
+	// 窗口外重置
+	if (now - (record.firstAt || 0) > ttl * 1000) {
+		record = { count: 0, firstAt: now, attempts: [] };
+	}
+	record.count = (record.count || 0) + 1;
+	record.lastAt = now;
+	record.attempts = (record.attempts || []).slice(-20);
+	record.attempts.push({ at: now, ip });
+	await 安全KV写入JSON(运行时.env, key, record, ttl);
+
+	const challengeAt = rc.registerIpChallengeThreshold || 3;
+	const blockAt = rc.registerIpBlockThreshold || 5;
+	if (record.count > blockAt) return { action: 'block', count: record.count, threshold: blockAt, fp };
+	if (record.count > challengeAt) return { action: 'challenge', count: record.count, threshold: challengeAt, fp };
+	return { action: 'allow', count: record.count, fp };
+}
+
+// ── 写入用户风控特征（注册成功后调用，持久化 riskScore/clusterId/flags/registerIp/deviceFp）──
+async function 安全风控标记用户风险(运行时, user, riskInfo = {}) {
+	if (!user?.uuid) return user;
+	user.riskScore = riskInfo.riskScore || user.riskScore || 0;
+	if (riskInfo.clusterId) user.riskClusterId = riskInfo.clusterId;
+	if (riskInfo.flags) user.riskFlags = riskInfo.flags;
+	if (riskInfo.registerIp) user.registerIp = riskInfo.registerIp;
+	if (riskInfo.deviceFp) user.deviceFp = riskInfo.deviceFp;
+	// 同步到 attributes 便于 KV 回退读取
+	user.attributes = user.attributes || {};
+	if (riskInfo.registerIp) user.attributes.registerIp = riskInfo.registerIp;
+	if (riskInfo.deviceFp) user.attributes.deviceFp = riskInfo.deviceFp;
+	if (riskInfo.clusterId) user.attributes.riskClusterId = riskInfo.clusterId;
+	user.attributes.riskScore = user.riskScore;
+	return user;
+}
+
+// ── 申诉白名单（误封用户申诉解封后标记，后续聚类排除）──
+async function 安全风控读取申诉白名单(运行时) {
+	const set = new Set();
+	if (!运行时?.env?.KV) return set;
+	try {
+		const data = await 安全KV读取JSON(运行时.env, 风控申诉白名单键, {});
+		if (data && typeof data === 'object') {
+			for (const k of Object.keys(data)) if (data[k]) set.add(k.toLowerCase());
+		}
+	} catch (e) {}
+	return set;
+}
+async function 安全风控加入申诉白名单(运行时, uuid) {
+	if (!运行时?.env?.KV || !uuid) return false;
+	const data = await 安全KV读取JSON(运行时.env, 风控申诉白名单键, {});
+	data[String(uuid).toLowerCase()] = true;
+	await 安全KV写入JSON(运行时.env, 风控申诉白名单键, data);
+	return true;
+}
+async function 安全风控移除申诉白名单(运行时, uuid) {
+	if (!运行时?.env?.KV || !uuid) return false;
+	const data = await 安全KV读取JSON(运行时.env, 风控申诉白名单键, {});
+	delete data[String(uuid).toLowerCase()];
+	await 安全KV写入JSON(运行时.env, 风控申诉白名单键, data);
+	return true;
+}
+
+// ── 批量处置：一键封禁风险集群（复用现有 ban 动作）──
+async function 安全风控批量封禁集群(运行时, url, clusterId, members, meta = {}, nowMs) {
+	const uuids = (Array.isArray(members) ? members : []).filter(u => 安全UUID有效(u));
+	const result = await 安全批量执行用户管理动作(运行时, url, 'ban', uuids, {
+		...meta,
+		reason: 'risk-cluster-' + clusterId,
+		source: '风控集群批量封禁',
+	}, nowMs);
+	// 写入违规账号统计报表
+	const report = {
+		reportId: 安全生成UUID(),
+		clusterId,
+		action: 'ban',
+		count: uuids.length,
+		members: uuids,
+		reason: 'risk-cluster-' + clusterId,
+		disposedAt: nowMs,
+		operator: meta.ip || meta.source || 'admin',
+	};
+	await 安全KV写入JSON(运行时.env, 风控集群报告前缀 + nowMs + ':' + report.reportId, report, 90 * 24 * 3600);
+	return { ...result, report };
+}
+
+// ── 违规账号统计报表查询 ──
+async function 安全风控获取报表列表(运行时, limit = 50) {
+	if (!运行时?.env) return [];
+	const records = await 安全列出KV记录(运行时.env, 风控集群报告前缀, Math.min(limit, 200));
+	return records.sort((a, b) => (b.disposedAt || 0) - (a.disposedAt || 0)).slice(0, limit);
+}
+
+// ── 为用户管理信息附加风控视图（供前端展示）──
+async function 安全构建用户风控信息(运行时, user, nowMs, config) {
+	const rc = config?.riskControl || 获取默认安全配置().riskControl;
+	if (!rc.enabled) return null;
+	const flags = user.riskFlags || 安全风控提取账号风险标记(user, rc);
+	const whitelist = await 安全风控读取申诉白名单(运行时);
+	const isWhitelisted = whitelist.has(String(user.uuid || '').toLowerCase());
+	// 实时计算单账号风险标记分数（非集群分，用于行内提示）
+	let singleScore = 0;
+	if (flags.usernamePattern) singleScore += 25;
+	if (flags.usernameEmailCharsetOverlap) singleScore += 20;
+	if (flags.suspiciousEmailDomain) singleScore += 10;
+	if (flags.lowTraffic) singleScore += 10;
+	if (flags.noTgBinding) singleScore += 5;
+	singleScore = Math.min(100, singleScore);
+	return {
+		enabled: true,
+		score: user.riskScore || singleScore,
+		clusterId: user.riskClusterId || null,
+		flags,
+		whitelisted: isWhitelisted,
+		registerIp: user.registerIp || user.attributes?.registerIp || null,
+		deviceFp: user.deviceFp || user.attributes?.deviceFp || null,
+	};
 }
 
 // ── TG验证常量与键 ──
@@ -7698,6 +8168,12 @@ async function 安全设置用户订阅状态(运行时, uuid, enabled, meta = {
 	user.subscriptionState = enabled ? 'active' : 'banned';
 	user.bannedAt = enabled ? null : nowMs;
 	user.bannedReason = stateReason;
+	// ── 风控兼容：解禁时若原因为风控集群封禁，自动加入申诉白名单，避免被重新聚类 ──
+	if (enabled && stateReason === null && user.bannedReason && String(user.bannedReason).startsWith('risk-cluster-')) {
+		try { await 安全风控加入申诉白名单(运行时, uuid); } catch(e) {}
+		user.riskFlags = user.riskFlags || {};
+		user.riskFlags.manualWhitelist = true;
+	}
 	const saved = await 安全保存用户记录(运行时, user, nowMs);
 	await 安全记录事件(运行时, {
 		eventType: enabled ? 'user.restored' : 'user.banned',
@@ -8819,13 +9295,109 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 	}
 
 
-if (pathname === '/admin/system/users/audit' && request.method === 'GET') {
+	if (pathname === '/admin/system/users/audit' && request.method === 'GET') {
 		const uuid = String(url.searchParams.get('uuid') || '').trim().toLowerCase();
 		const events = await 安全列出KV记录(运行时.env, 安全事件前缀, Math.min(limit * 6, 120));
 		return 安全JSON响应({
 			success: true,
 			events: 安全筛选用户管理事件(events, uuid, limit),
 		});
+	}
+
+	// ════════════════════════════════════════════════════════════════
+	//  风控（薅羊毛防治）管理 API
+	// ════════════════════════════════════════════════════════════════
+
+	// 扫描识别风险集群
+	if (pathname === '/admin/system/risk/clusters' && request.method === 'GET') {
+		const windowHours = 安全数值(url.searchParams.get('windowHours'), 当前安全配置.riskControl?.clusterWindowHours || 72, 1, 720);
+		const allUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, 5000);
+		const enrichedUsers = await Promise.all(allUsers.map(u => 安全构建用户管理信息(运行时, url, u, nowMs, 当前安全配置)));
+		const clusterConfig = 安全深合并(当前安全配置, { riskControl: { clusterWindowHours: windowHours } });
+		const clusters = await 安全风控识别风险集群(运行时, enrichedUsers, clusterConfig, nowMs);
+		const totalFlagged = clusters.reduce((sum, c) => sum + c.size, 0);
+		return 安全JSON响应({
+			success: true,
+			windowHours,
+			summary: {
+				clusterCount: clusters.length,
+				flaggedUserCount: totalFlagged,
+				scannedUserCount: enrichedUsers.length,
+			},
+			clusters,
+		});
+	}
+
+	// 一键批量封禁风险集群
+	if (pathname === '/admin/system/risk/ban-cluster' && request.method === 'POST') {
+		const payload = await request.json().catch(() => ({}));
+		const clusterId = String(payload.clusterId || '').trim();
+		const members = Array.isArray(payload.members) ? payload.members : [];
+		if (!clusterId || !members.length) return 安全JSON响应({ success: false, error: 'clusterId 和 members 不能为空' }, 400);
+		const result = await 安全风控批量封禁集群(运行时, url, clusterId, members, {
+			ip: 访问IP,
+			source: 'admin-api',
+		}, nowMs);
+		await 安全记录事件(运行时, {
+			eventType: 'risk.cluster.banned',
+			subjectType: 'admin',
+			subjectId: 访问IP || 'admin',
+			ip: 访问IP || null,
+			payload: { clusterId, count: members.length, banned: result.summary?.succeeded || 0 },
+			createdAt: nowMs,
+		});
+		return 安全JSON响应({ success: true, ...result });
+	}
+
+	// 违规账号统计报表
+	if (pathname === '/admin/system/risk/report' && request.method === 'GET') {
+		const reports = await 安全风控获取报表列表(运行时, Math.min(limit, 100));
+		const totalDisposed = reports.reduce((sum, r) => sum + (r.count || 0), 0);
+		return 安全JSON响应({
+			success: true,
+			summary: {
+				reportCount: reports.length,
+				totalDisposedAccounts: totalDisposed,
+				latestDisposedAt: reports[0]?.disposedAt || null,
+			},
+			reports,
+		});
+	}
+
+	// 申诉白名单：加入（误封解封）
+	if (pathname === '/admin/system/risk/whitelist' && request.method === 'POST') {
+		const payload = await request.json().catch(() => ({}));
+		if (!安全UUID有效(payload.uuid)) return 安全JSON响应({ success: false, error: 'uuid 不能为空且必须合法' }, 400);
+		const ok = await 安全风控加入申诉白名单(运行时, payload.uuid);
+		// 解封该用户（兼容现有 restore 流程）
+		if (payload.restore !== false) {
+			await 安全执行用户管理动作(运行时, url, 'restore', payload.uuid, {
+				ip: 访问IP, reason: 'risk-false-positive-appeal', source: 'admin-api',
+			}, nowMs);
+		}
+		await 安全记录事件(运行时, {
+			eventType: 'risk.whitelist.added',
+			subjectType: 'uuid',
+			subjectId: String(payload.uuid).toLowerCase(),
+			ip: 访问IP || null,
+			payload: { reason: payload.reason || 'appeal' },
+			createdAt: nowMs,
+		});
+		return 安全JSON响应({ success: true, uuid: payload.uuid, whitelisted: ok });
+	}
+
+	// 申诉白名单：移除
+	if (pathname === '/admin/system/risk/whitelist/remove' && request.method === 'POST') {
+		const payload = await request.json().catch(() => ({}));
+		if (!安全UUID有效(payload.uuid)) return 安全JSON响应({ success: false, error: 'uuid 不能为空且必须合法' }, 400);
+		const ok = await 安全风控移除申诉白名单(运行时, payload.uuid);
+		return 安全JSON响应({ success: true, uuid: payload.uuid, removed: ok });
+	}
+
+	// 申诉白名单：查询
+	if (pathname === '/admin/system/risk/whitelist' && request.method === 'GET') {
+		const whitelist = await 安全风控读取申诉白名单(运行时);
+		return 安全JSON响应({ success: true, uuids: [...whitelist] });
 	}
 
 	if (pathname === '/admin/system/events' && request.method === 'GET') {
@@ -9036,6 +9608,8 @@ async function 安全构建用户管理信息(运行时, url, user, nowMs, confi
 	const subscriptionRisk = 安全构建订阅风险信息(subscriptionMonitor, effectiveConfig, nowMs);
 	const subscriptionStatus = 安全用户已封禁(user) ? 'banned' : 'active';
 	const status = subscriptionStatus === 'banned' || activeBan ? 'banned' : 'active';
+	// ── 风控（薅羊毛防治）视图 ──
+	const riskControl = await 安全构建用户风控信息(运行时, user, nowMs, effectiveConfig);
 	return {
 		...user,
 		profile,
@@ -9070,6 +9644,7 @@ async function 安全构建用户管理信息(运行时, url, user, nowMs, confi
 			} : null,
 			risk: subscriptionRisk,
 		},
+		riskControl,
 		lifecycle: {
 			createdAt: user.createdAt || null,
 			updatedAt: user.updatedAt || null,
@@ -10481,15 +11056,24 @@ function 生成安全管理后台注入代码() {
     subscription_unique_ip_alert_limit: 6,
     register_enabled: false,
     register_schedule_enabled: false,
-    register_start_at: ''
+    register_start_at: '',
+    // 风控（薅羊毛防治）默认值
+    risk_enabled: true,
+    risk_similarity_threshold: 0.6,
+    risk_username_charset_threshold: 0.5,
+    risk_cluster_min_size: 3,
+    risk_cluster_window_hours: 72,
+    risk_register_ip_challenge: 3,
+    risk_register_ip_block: 5,
+    risk_register_window_hours: 24
   };
   const tgDefaultSettings = { botToken: '', chatId: '', securityNotifyEnabled: false };
   const shell = document.getElementById('admin-plus-shell');
   if (!shell) { document.querySelector('.admin-plus-layout') && (document.querySelector('.admin-plus-layout').innerHTML = '<div class="admin-plus-panel"><div class="admin-plus-empty">Shell element not found.</div></div>'); return; }
   const layoutEl = shell.querySelector('.admin-plus-layout');
-  const state = { tab: 'overview', overview: null, users: null, usersSummary: null, userSearch: '', userStatusFilter: 'all', selectedUserUuid: null, selectedUserUuids: [], userAudit: [], config: null, registration: null, usersCursor: null, usersHasMore: false, theme: 'spacex', tgState: { botToken: '', chatId: '', securityNotifyEnabled: false, syncEnabled: false } };
+  const state = { tab: 'overview', overview: null, users: null, usersSummary: null, userSearch: '', userStatusFilter: 'all', selectedUserUuid: null, selectedUserUuids: [], userAudit: [], config: null, registration: null, usersCursor: null, usersHasMore: false, theme: 'spacex', tgState: { botToken: '', chatId: '', securityNotifyEnabled: false, syncEnabled: false }, riskClusters: null, riskSummary: null, riskReports: null };
   const cacheTime = {};
-  const cacheTTL = { overview: 8000, users: 15000, config: 20000, registration: 10000 };
+  const cacheTTL = { overview: 8000, users: 15000, config: 20000, registration: 10000, risk: 15000 };
 
   const layouts = {
     spacex: function() {
@@ -10512,6 +11096,7 @@ function 生成安全管理后台注入代码() {
         '<button class="admin-plus-tab active" data-tab="overview" type="button">OVERVIEW</button>' +
         '<button class="admin-plus-tab" data-tab="users" type="button">UUID AUTH</button>' +
         '<button class="admin-plus-tab" data-tab="registration" type="button">REG CTRL</button>' +
+        '<button class="admin-plus-tab" data-tab="risk" type="button">RISK</button>' +
         '<button class="admin-plus-tab" data-tab="config" type="button">POLICY</button>' +
       '</div>' +
       '<div class="admin-plus-status" id="admin-plus-status">INITIALIZING...</div>' +
@@ -10532,6 +11117,10 @@ function 生成安全管理后台注入代码() {
           '<button class="admin-plus-sidebar-tab" data-tab="registration" type="button">' +
             '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z"/></svg>' +
             '<span>Registration</span>' +
+          '</button>' +
+          '<button class="admin-plus-sidebar-tab" data-tab="risk" type="button">' +
+            '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/></svg>' +
+            '<span>Risk</span>' +
           '</button>' +
           '<button class="admin-plus-sidebar-tab" data-tab="config" type="button">' +
             '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.154c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.252l1.148 1.148a1.125 1.125 0 01-.26 1.622l-.733.558a1.125 1.125 0 01-1.042.242l-1.074-.428a1.125 1.125 0 00-1.217.548l-1.207 1.04a1.125 1.125 0 01-1.62-.948V19.5a1.5 1.5 0 01-1.5-1.5v-1.125a1.125 1.125 0 00-1.012-1.125H9.3a1.125 1.125 0 00-1.125.625l-.77 1.236a1.125 1.125 0 01-1.115 1.004H7.5a1.5 1.5 0 01-1.5-1.5v-1.5a1.5 1.5 0 011.372-1.47l1.04-.77a1.125 1.125 0 011.004-1.115h1.43c.542 0 1.02-.398 1.11-.94l.213-1.28c.064-.375.313-.687.646-.87a.626.626 0 00.22-.128l.01-.011z"/></svg>' +
@@ -10568,6 +11157,7 @@ function 生成安全管理后台注入代码() {
             '<button class="admin-plus-tab active" data-tab="overview" type="button">Overview</button>' +
             '<button class="admin-plus-tab" data-tab="users" type="button">UUID Auth</button>' +
             '<button class="admin-plus-tab" data-tab="registration" type="button">Registration</button>' +
+            '<button class="admin-plus-tab" data-tab="risk" type="button">Risk</button>' +
             '<button class="admin-plus-tab" data-tab="config" type="button">Policy</button>' +
           '</div>' +
         '</div>' +
@@ -10600,6 +11190,9 @@ function 生成安全管理后台注入代码() {
           '</button>' +
           '<button class="admin-plus-sidebar-tab" data-tab="registration" type="button" title="Registration">' +
             '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z"/></svg>' +
+          '</button>' +
+          '<button class="admin-plus-sidebar-tab" data-tab="risk" type="button" title="Risk">' +
+            '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/></svg>' +
           '</button>' +
           '<button class="admin-plus-sidebar-tab" data-tab="config" type="button" title="Policy">' +
             '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.154c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.252l1.148 1.148a1.125 1.125 0 01-.26 1.622l-.733.558a1.125 1.125 0 01-1.042.242l-1.074-.428a1.125 1.125 0 00-1.217.548l-1.207 1.04a1.125 1.125 0 01-1.62-.948V19.5a1.5 1.5 0 01-1.5-1.5v-1.125a1.125 1.125 0 00-1.012-1.125H9.3a1.125 1.125 0 00-1.125.625l-.77 1.236a1.125 1.125 0 01-1.115 1.004H7.5a1.5 1.5 0 01-1.5-1.5v-1.5a1.5 1.5 0 011.372-1.47l1.04-.77a1.125 1.125 0 011.004-1.115h1.43c.542 0 1.02-.398 1.11-.94l.213-1.28c.064-.375.313-.687.646-.87a.626.626 0 00.22-.128l.01-.011z"/></svg>' +
@@ -10777,6 +11370,7 @@ function 生成安全管理后台注入代码() {
     if (tab === 'users') return Array.isArray(state.users);
     if (tab === 'config') return !!state.config;
     if (tab === 'registration') return !!state.registration;
+    if (tab === 'risk') return Array.isArray(state.riskClusters);
     return false;
   }
 
@@ -10817,6 +11411,17 @@ function 生成安全管理后台注入代码() {
         try { const tg = await api('/admin/system/tg-config'); state.tgState = { botToken: tg.botToken || '', chatId: tg.chatId || '', securityNotifyEnabled: !!tg.securityNotifyEnabled, syncEnabled: !!tg.syncEnabled }; } catch(e) {}
       }
       if (tab === 'registration') state.registration = await api('/admin/system/registration');
+      if (tab === 'risk') {
+        try {
+          const clusters = await api('/admin/system/risk/clusters?windowHours=72');
+          state.riskClusters = clusters.clusters || [];
+          state.riskSummary = clusters.summary || {};
+        } catch(e) { state.riskClusters = []; state.riskSummary = {}; }
+        try {
+          const reports = await api('/admin/system/risk/report?limit=50');
+          state.riskReports = reports;
+        } catch(e) { state.riskReports = { reports: [], summary: {} }; }
+      }
       cacheTime[tab] = Date.now();
       render();
       setStatus('最后更新: ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }));
@@ -10866,6 +11471,18 @@ function 生成安全管理后台注入代码() {
     if (level === 'high') return { label: '高风险', className: ' warn' };
     if (level === 'medium') return { label: '中风险', className: ' muted' };
     return { label: '低风险', className: '' };
+  }
+
+  // 风控（薅羊毛防治）徽章：基于 riskControl.score / clusterId / flags 渲染
+  function getRiskControlMeta(rc) {
+    if (!rc || !rc.enabled) return { label: '-', className: ' muted', score: 0 };
+    const score = rc.score || 0;
+    if (rc.whitelisted) return { label: '已申诉', className: '', score, whitelisted: true };
+    if (rc.clusterId) return { label: '集群 ' + score, className: ' warn', score, clusterId: rc.clusterId };
+    if (score >= 50) return { label: '高风险 ' + score, className: ' warn', score };
+    if (score >= 25) return { label: '中风险 ' + score, className: ' muted', score };
+    if (score > 0) return { label: '低风险 ' + score, className: '', score };
+    return { label: '正常', className: '', score: 0 };
   }
 
   function renderTrendMini(trend) {
@@ -11100,13 +11717,16 @@ function 生成安全管理后台注入代码() {
         card('封禁用户', summary.banned != null ? summary.banned : '-') +
       '</div>',
       '<div class="admin-plus-panel"><div class="admin-plus-panel-header-wrap"><div><h3>用户列表</h3><div class="admin-plus-desc">支持按用户名、邮箱、UUID、IP 搜索，并执行批量封禁、解封、设置总限额、重置订阅和删除用户。</div></div><div class="admin-plus-toolbar"><input id="admin-plus-user-search" class="admin-plus-inline-input" placeholder="搜索 用户名 / 邮箱 / UUID / IP" value="' + escapeHtml(state.userSearch || '') + '" /><select id="admin-plus-user-status-filter" class="admin-plus-inline-input" style="min-width:160px"><option value="all"' + (state.userStatusFilter === 'all' ? ' selected' : '') + '>全部状态</option><option value="active"' + (state.userStatusFilter === 'active' ? ' selected' : '') + '>正常</option><option value="banned"' + (state.userStatusFilter === 'banned' ? ' selected' : '') + '>已封禁</option></select><button class="admin-plus-btn secondary" type="button" id="admin-plus-select-filtered">全选当前筛选</button><button class="admin-plus-btn secondary" type="button" id="admin-plus-clear-selection">清空选择</button><a class="admin-plus-btn secondary" href="/register" target="_blank" rel="noreferrer">打开用户面板</a></div></div><div class="admin-plus-empty" style="padding:16px 20px;align-items:flex-start;text-align:left">已选择 ' + escapeHtml(selectedCount) + ' 个用户，可直接执行批量动作。<div class="admin-plus-actions"><button class="admin-plus-btn warn" type="button" data-batch-action="ban">批量封禁</button><button class="admin-plus-btn" type="button" data-batch-action="restore">批量解封</button><button class="admin-plus-btn secondary" type="button" data-batch-action="reset-subscription">批量重置订阅</button><button class="admin-plus-btn warn" type="button" data-batch-action="delete">批量删除</button></div></div>',
-      renderTable(['选择', '用户名', '邮箱', 'UUID', 'TG账号', '状态', '总限额', '最近活跃', '操作'], filteredUsers.map(item => [
+      renderTable(['选择', '用户名', '邮箱', 'UUID', 'TG账号', '状态', '风控', '总限额', '最近活跃', '操作'], filteredUsers.map(item => {
+        const rcMeta = getRiskControlMeta(item.riskControl);
+        return [
         '<input type="checkbox" data-user-toggle="' + escapeHtml(item.uuid) + '"' + (selectedSet.has(item.uuid) ? ' checked' : '') + ' />',
         escapeHtml(item.profile && item.profile.account || item.profile && item.profile.email || item.label || item.uuid || '未绑定'),
         escapeHtml(item.profile && item.profile.email || item.email || '未绑定邮箱'),
         '<code>' + escapeHtml(item.uuid || '-') + '</code>',
-		'<span class="admin-plus-badge muted">' + escapeHtml(item.profile && (item.profile.tgUsername || item.profile.tgFirstName) || '未绑定') + '</span>',
+			'<span class="admin-plus-badge muted">' + escapeHtml(item.profile && (item.profile.tgUsername || item.profile.tgFirstName) || '未绑定') + '</span>',
         '<span class="admin-plus-badge' + getUserStatusMeta(item).className + '">' + escapeHtml(getUserStatusMeta(item).label) + '</span>',
+        '<span class="admin-plus-badge' + rcMeta.className + '" title="' + (item.riskControl && item.riskControl.clusterId ? '集群: ' + escapeHtml(item.riskControl.clusterId) : '') + '">' + escapeHtml(rcMeta.label) + '</span>',
         escapeHtml(fmtQuotaAdmin(item.traffic)),
         escapeHtml(fmtTime(item.lastSeenAt)),
         '<div class="admin-plus-actions">' +
@@ -11120,7 +11740,7 @@ function 生成安全管理后台注入代码() {
           '<button class="admin-plus-btn secondary tiny" data-user-action="reset-subscription" data-user-uuid="' + escapeHtml(item.uuid) + '">重置订阅</button>' +
           '<button class="admin-plus-btn warn tiny" data-user-action="delete" data-user-uuid="' + escapeHtml(item.uuid) + '">删除</button>' +
         '</div>'
-      ])),
+      ];}),
       '</div>'
       + '<div style="margin-top:16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px"><span style="color:var(--ap-text-muted);font-size:13px">当前显示 ' + escapeHtml(users.length || 0) + ' 名用户' + (state.usersTotalCount && !state.userStatusFilter ? (' / 共 ' + escapeHtml(state.usersTotalCount) + ' 名') : '') + '</span>' + (state.usersHasMore ? '<button class="admin-plus-btn secondary" id="admin-plus-load-more" type="button"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:14px;height:14px;"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg> 加载更多</button>' : '') + (state.usersHasMore ? '' : '<span style="color:var(--ap-text-muted);font-size:13px">已显示全部用户</span>') + '</div>'
       ,
@@ -11171,8 +11791,82 @@ function 生成安全管理后台注入代码() {
           detail('最近超限时间', escapeHtml(fmtTime(monitor && monitor.lastLimitExceededAt))) +
           detail('探活地址', '<a class="admin-plus-link" target="_blank" rel="noreferrer" href="' + escapeHtml(selectedUser.node.versionUrl || '#') + '">' + escapeHtml(selectedUser.node.versionUrl || '-') + '</a>') +
           detail('订阅地址', '<a class="admin-plus-link" target="_blank" rel="noreferrer" href="' + escapeHtml(selectedUser.node.subscriptionUrl || '#') + '">' + escapeHtml(selectedUser.node.subscriptionUrl || '-') + '</a>') +
-        '</div><div class="admin-plus-panel" style="margin-top:20px"><h3>24 小时订阅趋势</h3>' + renderTrendMini(risk && risk.trend24h) + '</div>' + (selectedUser.activeBan ? '<div class="admin-plus-empty" style="padding:18px 20px;align-items:flex-start;text-align:left">当前封禁原因：' + escapeHtml((selectedUser.activeBan.reasonType || '-') + ' / ' + (selectedUser.activeBan.reasonDetail || '-')) + '；预计解封时间：' + escapeHtml(fmtTime(selectedUser.activeBan.expiresAt)) + '</div>' : '') + ((selectedUser.subscription && selectedUser.subscription.status === 'banned') ? '<div class="admin-plus-empty" style="padding:18px 20px;align-items:flex-start;text-align:left">账号封禁原因：' + escapeHtml(selectedUser.subscription.bannedReasonLabel || selectedUser.subscription.bannedReason || '订阅风控触发自动封禁') + '；封禁时间：' + escapeHtml(fmtTime(selectedUser.subscription.bannedAt)) + '。只有管理员解封后，登录和订阅才会恢复。</div>' : '') + '<div class="admin-plus-empty" style="padding:18px 20px;align-items:flex-start;text-align:left">订阅风控说明：系统会统计当前用户本小时订阅次数、24 小时趋势、无效令牌与来源 IP 扩散情况；一旦命中任一阈值，账号会被直接封禁，只有管理员才能解封。</div><div class="admin-plus-panel" style="margin-top:20px"><h3>最近管理员动作</h3>' + renderTable(['时间', '动作', '发起主体', '详情'], auditEvents.map(item => [escapeHtml(fmtTime(item.createdAt)), '<span class="admin-plus-badge">' + escapeHtml(item.eventType || '-') + '</span>', '<code>' + escapeHtml((item.subjectType || '-') + ':' + (item.subjectId || '-')) + '</code>', '<code>' + escapeHtml(JSON.stringify(item.payload || {})) + '</code>'])) + '</div></div>'
+        '</div>' + (function() {
+          // ── 风控（薅羊毛防治）详情面板 ──
+          const rc = selectedUser.riskControl;
+          if (!rc || !rc.enabled) return '';
+          const rcMeta = getRiskControlMeta(rc);
+          const flagList = rc.flags ? Object.keys(rc.flags) : [];
+          const flagLabels = { usernamePattern: '用户名字符受限', usernameEmailCharsetOverlap: '用户名与邮箱字符重合', suspiciousEmailDomain: '可疑邮箱域名', lowTraffic: '初始流量极低', noTgBinding: '未绑定TG' };
+          return '<div class="admin-plus-panel" style="margin-top:20px"><h3>🛡️ 风控信息（薅羊毛防治）</h3><div class="admin-plus-detail-grid">' +
+            detail('风控风险分', '<strong>' + escapeHtml(rcMeta.score) + '</strong>') +
+            detail('风控状态', '<span class="admin-plus-badge' + rcMeta.className + '">' + escapeHtml(rcMeta.label) + '</span>') +
+            detail('风险集群ID', rc.clusterId ? '<code>' + escapeHtml(rc.clusterId) + '</code>' : '-') +
+            detail('注册IP', escapeHtml(rc.registerIp || '-')) +
+            detail('设备指纹', '<code>' + escapeHtml(rc.deviceFp || '-') + '</code>') +
+            detail('申诉白名单', rc.whitelisted ? '<span class="admin-plus-badge">已加入</span>' : '<span class="admin-plus-badge muted">未加入</span>') +
+            detail('风险标记', flagList.length ? flagList.map(f => '<span class="admin-plus-badge muted">' + escapeHtml(flagLabels[f] || f) + '</span>').join(' ') : '<span class="admin-plus-badge muted">无</span>') +
+          '</div>' + (rc.clusterId || rcMeta.score >= 25 ? '<div class="admin-plus-actions" style="margin-top:12px">' +
+            (rc.whitelisted ? '<button class="admin-plus-btn secondary tiny" data-risk-action="whitelist-remove" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">移除申诉白名单</button>' : '<button class="admin-plus-btn secondary tiny" data-risk-action="whitelist" data-user-uuid="' + escapeHtml(selectedUser.uuid) + '">申诉解封（加入白名单）</button>') +
+          '</div>' : '') + '<div class="admin-plus-empty" style="padding:12px 20px;align-items:flex-start;text-align:left;font-size:12px">风控说明：系统对近期新注册账号进行用户名编辑距离、字符集重合度、邮箱域名、注册IP/设备指纹多维度加权聚类，规模≥3且相似度超阈值的账号集群标记为风险集群，支持一键批量封禁与申诉解封。</div></div>';
+        })() + '<div class="admin-plus-panel" style="margin-top:20px"><h3>24 小时订阅趋势</h3>' + renderTrendMini(risk && risk.trend24h) + '</div>' + (selectedUser.activeBan ? '<div class="admin-plus-empty" style="padding:18px 20px;align-items:flex-start;text-align:left">当前封禁原因：' + escapeHtml((selectedUser.activeBan.reasonType || '-') + ' / ' + (selectedUser.activeBan.reasonDetail || '-')) + '；预计解封时间：' + escapeHtml(fmtTime(selectedUser.activeBan.expiresAt)) + '</div>' : '') + ((selectedUser.subscription && selectedUser.subscription.status === 'banned') ? '<div class="admin-plus-empty" style="padding:18px 20px;align-items:flex-start;text-align:left">账号封禁原因：' + escapeHtml(selectedUser.subscription.bannedReasonLabel || selectedUser.subscription.bannedReason || '订阅风控触发自动封禁') + '；封禁时间：' + escapeHtml(fmtTime(selectedUser.subscription.bannedAt)) + '。只有管理员解封后，登录和订阅才会恢复。</div>' : '') + '<div class="admin-plus-empty" style="padding:18px 20px;align-items:flex-start;text-align:left">订阅风控说明：系统会统计当前用户本小时订阅次数、24 小时趋势、无效令牌与来源 IP 扩散情况；一旦命中任一阈值，账号会被直接封禁，只有管理员才能解封。</div><div class="admin-plus-panel" style="margin-top:20px"><h3>最近管理员动作</h3>' + renderTable(['时间', '动作', '发起主体', '详情'], auditEvents.map(item => [escapeHtml(fmtTime(item.createdAt)), '<span class="admin-plus-badge">' + escapeHtml(item.eventType || '-') + '</span>', '<code>' + escapeHtml((item.subjectType || '-') + ':' + (item.subjectId || '-')) + '</code>', '<code>' + escapeHtml(JSON.stringify(item.payload || {})) + '</code>'])) + '</div></div>'
       ) : ''
+    ].join('');
+  }
+
+  function renderRisk() {
+    const clusters = Array.isArray(state.riskClusters) ? state.riskClusters : [];
+    const summary = state.riskSummary || {};
+    const reports = (state.riskReports && Array.isArray(state.riskReports.reports)) ? state.riskReports.reports : [];
+    const reportSummary = (state.riskReports && state.riskReports.summary) || {};
+    return [
+      '<div class="admin-plus-grid">' +
+        card('风险集群数', summary.clusterCount || 0) +
+        card('涉及账号数', summary.flaggedUserCount || 0) +
+        card('扫描账号数', summary.scannedUserCount || 0) +
+        card('累计处置账号', reportSummary.totalDisposedAccounts || 0) +
+      '</div>',
+      '<div class="admin-plus-panel"><div class="admin-plus-panel-header-wrap"><div><h3>🛡️ 风险集群识别（薅羊毛防治）</h3><div class="admin-plus-desc">基于用户名编辑距离、字符集重合度、邮箱域名、注册IP/设备指纹多维度加权聚类。规模≥3 且相似度超阈值的账号集群标记为风险集群，支持一键批量封禁。</div></div><div class="admin-plus-actions"><button class="admin-plus-btn" type="button" id="admin-plus-risk-scan">重新扫描</button></div></div>' +
+      (clusters.length === 0
+        ? '<div class="admin-plus-empty" style="padding:24px 20px">当前回溯窗口（72 小时）内未发现风险集群。可点击"重新扫描"刷新。</div>'
+        : renderTable(['集群ID', '规模', '平均相似度', '风险分', '风险标记', '操作'], clusters.map(c => {
+            const flagLabels = { usernamePattern: '用户名字符受限', usernameEmailCharsetOverlap: '用户名邮箱重合', suspiciousEmailDomain: '可疑邮箱', lowTraffic: '低流量', noTgBinding: '未绑TG' };
+            const flags = Object.keys(c.flags || {}).map(f => '<span class="admin-plus-badge muted">' + escapeHtml(flagLabels[f] || f) + '</span>').join(' ');
+            return [
+              '<code>' + escapeHtml(c.clusterId) + '</code>',
+              '<strong>' + escapeHtml(c.size) + '</strong>',
+              escapeHtml(c.avgSimilarity),
+              '<span class="admin-plus-badge warn">' + escapeHtml(c.riskScore) + '</span>',
+              flags || '<span class="admin-plus-badge muted">无</span>',
+              '<button class="admin-plus-btn warn tiny" data-risk-ban-cluster="1" data-cluster-id="' + escapeHtml(c.clusterId) + '" data-cluster-members=\'' + escapeHtml(JSON.stringify(c.members)) + '\'>一键封禁集群</button>'
+            ];
+          }))) +
+      '</div>',
+      '<div class="admin-plus-panel" style="margin-top:20px"><h3>风险集群成员明细</h3>' +
+      (clusters.length === 0 ? '<div class="admin-plus-empty" style="padding:16px 20px">暂无成员</div>' :
+        renderTable(['集群', 'UUID', '用户名', '邮箱', '注册IP', '创建时间', '状态'], clusters.flatMap(c =>
+          (c.memberDetails || []).map(m => [
+            '<code>' + escapeHtml(c.clusterId) + '</code>',
+            '<code>' + escapeHtml((m.uuid || '').slice(0, 12) + '...') + '</code>',
+            escapeHtml(m.account || '-'),
+            escapeHtml(m.email || '-'),
+            escapeHtml(m.registerIp || '-'),
+            escapeHtml(fmtTime(m.createdAt)),
+            '<span class="admin-plus-badge' + (m.status === 'banned' ? ' warn' : '') + '">' + escapeHtml(m.status === 'banned' ? '已封禁' : '正常') + '</span>'
+          ])
+        ))) +
+      '</div>',
+      '<div class="admin-plus-panel" style="margin-top:20px"><h3>📊 违规账号处置报表</h3><div class="admin-plus-desc" style="margin-bottom:12px">每批批量封禁操作自动生成报表，记录数量、特征与处置时间，保留 90 天。</div>' +
+      (reports.length === 0 ? '<div class="admin-plus-empty" style="padding:16px 20px">暂无处置记录</div>' :
+        renderTable(['处置时间', '集群ID', '处置动作', '账号数', '成功数', '操作来源'], reports.map(r => [
+          escapeHtml(fmtTime(r.disposedAt)),
+          '<code>' + escapeHtml(r.clusterId || '-') + '</code>',
+          '<span class="admin-plus-badge">' + escapeHtml(r.action || '-') + '</span>',
+          '<strong>' + escapeHtml(r.count || 0) + '</strong>',
+          escapeHtml((r.summary && r.summary.succeeded) || r.count || 0),
+          escapeHtml(r.operator || '-')
+        ]))) +
+      '</div>'
     ].join('');
   }
 
@@ -11184,6 +11878,7 @@ function 生成安全管理后台注入代码() {
     const payload = cfg.abuse && cfg.abuse.payload ? cfg.abuse.payload : {};
     const subscription = cfg.subscription || {};
     const register = cfg.register || {};
+    const risk = cfg.riskControl || {};
     const enabledValue = cfg.enabled ? 'true' : 'false';
     const registerStatus = !register.enabled
       ? '当前注册入口已关闭'
@@ -11208,6 +11903,15 @@ function 生成安全管理后台注入代码() {
         [{v:'0.5',l:'0.5 小时'},{v:'1',l:'1 小时'},{v:'2',l:'2 小时'},{v:'4',l:'4 小时'},{v:'8',l:'8 小时'},{v:'12',l:'12 小时'},{v:'24',l:'24 小时'}]
           .map(o => '<option value="' + o.v + '">' + o.l + '</option>').join('') +
       '</select></div>' +
+      '<h4 style="margin:20px 0 8px;color:var(--ap-text);border-top:1px solid var(--ap-border);padding-top:20px">🛡️ 风控（薅羊毛防治）</h4><div class="admin-plus-desc" style="margin-bottom:12px">多维度识别批量注册账号集群，支持自动封禁与申诉解封。误封率控制在 0.1% 以下。</div>' +
+      field('risk_enabled','风控总开关', typeof risk.enabled === 'boolean' ? (risk.enabled ? 'true' : 'false') : (defaultConfigPreset.risk_enabled ? 'true' : 'false'), 'select', [{label:'启用风控',value:'true'},{label:'停用风控',value:'false'}]) +
+      field('risk_similarity_threshold','账号相似度阈值 (0-1)', risk.accountSimilarityThreshold || defaultConfigPreset.risk_similarity_threshold) +
+      field('risk_username_charset_threshold','用户名字符集重合度阈值 (0-1)', risk.usernameCharsetJaccardThreshold || defaultConfigPreset.risk_username_charset_threshold) +
+      field('risk_cluster_min_size','风险集群最小规模', risk.clusterMinSize || defaultConfigPreset.risk_cluster_min_size) +
+      field('risk_cluster_window_hours','集群识别回溯窗口 (小时)', risk.clusterWindowHours || defaultConfigPreset.risk_cluster_window_hours) +
+      field('risk_register_ip_challenge','注册人机验证阈值 (同IP 24h)', risk.registerIpChallengeThreshold || defaultConfigPreset.risk_register_ip_challenge) +
+      field('risk_register_ip_block','注册拦截阈值 (同IP 24h)', risk.registerIpBlockThreshold || defaultConfigPreset.risk_register_ip_block) +
+      field('risk_register_window_hours','注册计数窗口 (小时)', risk.registerWindowHours || defaultConfigPreset.risk_register_window_hours) +
       '</form><div class="admin-plus-actions" style="margin-top:20px;border-top:1px solid var(--ap-border);padding-top:20px"><button class="admin-plus-btn secondary" id="admin-plus-reset-defaults" type="button">重置为推荐值</button><button class="admin-plus-btn" id="admin-plus-save-config" type="button">应用并保存配置</button></div></div>' +
       '<div class="admin-plus-panel" style="margin-top:20px"><h3>TG Bot 通知设置</h3>' +
       '<div class="admin-plus-desc" style="margin-bottom:16px">设置 Telegram Bot 后，封禁/解封等安全事件将自动通知到你的 TG 群组，并可发送 /bcbanned、/bcunban、/bcsync 等命令管理用户。</div>' +
@@ -11319,6 +12023,7 @@ function 生成安全管理后台注入代码() {
     if (state.tab === 'users') viewEl.innerHTML = renderUsers();
     if (state.tab === 'config') viewEl.innerHTML = renderConfig();
     if (state.tab === 'registration') viewEl.innerHTML = renderRegistration();
+    if (state.tab === 'risk') viewEl.innerHTML = renderRisk();
     bindViewEvents();
   }
 
@@ -11449,6 +12154,54 @@ function 生成安全管理后台注入代码() {
         setStatus('用户操作失败: ' + error.message);
       }
     });
+    // ── 风控：申诉白名单 / 移除白名单 ──
+    viewEl.querySelectorAll('[data-risk-action]').forEach((button) => button.onclick = async () => {
+      const action = button.getAttribute('data-risk-action');
+      const uuid = button.getAttribute('data-user-uuid');
+      if (!action || !uuid) return;
+      try {
+        if (action === 'whitelist') {
+          if (!window.confirm('确认将该用户加入申诉白名单并解封吗？加入后该账号不会被重新聚类为风险集群。')) return;
+          await api('/admin/system/risk/whitelist', { method: 'POST', body: JSON.stringify({ uuid, reason: 'admin-ui-appeal' }) });
+          setStatus('已加入申诉白名单并解封');
+        } else if (action === 'whitelist-remove') {
+          if (!window.confirm('确认将该用户移出申诉白名单吗？移出后可能重新被聚类识别。')) return;
+          await api('/admin/system/risk/whitelist/remove', { method: 'POST', body: JSON.stringify({ uuid }) });
+          setStatus('已移出申诉白名单');
+        }
+        state.selectedUserUuid = uuid;
+        await loadTab('users', true);
+      } catch (error) {
+        setStatus('风控操作失败: ' + error.message);
+      }
+    });
+    // ── 风控：风险集群扫描与一键封禁 ──
+    const riskScanBtn = document.getElementById('admin-plus-risk-scan');
+    if (riskScanBtn) riskScanBtn.onclick = async () => {
+      try {
+        setStatus('正在扫描风险集群...');
+        const result = await api('/admin/system/risk/clusters?windowHours=72');
+        state.riskClusters = result.clusters || [];
+        state.riskSummary = result.summary || {};
+        render();
+        setStatus('扫描完成：发现 ' + (state.riskClusters.length) + ' 个风险集群，涉及 ' + (state.riskSummary.flaggedUserCount || 0) + ' 个账号');
+      } catch (error) { setStatus('风险集群扫描失败: ' + error.message); }
+    };
+    viewEl.querySelectorAll('[data-risk-ban-cluster]').forEach((button) => button.onclick = async () => {
+      const clusterId = button.getAttribute('data-cluster-id');
+      const membersJson = button.getAttribute('data-cluster-members');
+      if (!clusterId || !membersJson) return;
+      let members = [];
+      try { members = JSON.parse(membersJson); } catch(e) {}
+      if (!members.length) return;
+      if (!window.confirm('确认一键批量封禁集群 ' + clusterId + ' 的 ' + members.length + ' 个账号吗？')) return;
+      try {
+        button.disabled = true; button.textContent = '封禁中...';
+        const result = await api('/admin/system/risk/ban-cluster', { method: 'POST', body: JSON.stringify({ clusterId, members }) });
+        setStatus('集群封禁完成：成功 ' + ((result.summary && result.summary.succeeded) || 0) + ' / ' + members.length);
+        await loadTab('users', true);
+      } catch (error) { setStatus('集群封禁失败: ' + error.message); button.disabled = false; button.textContent = '一键封禁集群'; }
+    });
     const saveBtn = document.getElementById('admin-plus-save-config');
     const resetBtn = document.getElementById('admin-plus-reset-defaults');
     if (resetBtn) resetBtn.onclick = () => {
@@ -11467,6 +12220,14 @@ function 生成安全管理后台注入代码() {
       form.elements.register_enabled.value = defaultConfigPreset.register_enabled ? 'true' : 'false';
       form.elements.register_schedule_enabled.value = defaultConfigPreset.register_schedule_enabled ? 'true' : 'false';
       form.elements.register_start_at.value = defaultConfigPreset.register_start_at;
+      form.elements.risk_enabled.value = defaultConfigPreset.risk_enabled ? 'true' : 'false';
+      form.elements.risk_similarity_threshold.value = defaultConfigPreset.risk_similarity_threshold;
+      form.elements.risk_username_charset_threshold.value = defaultConfigPreset.risk_username_charset_threshold;
+      form.elements.risk_cluster_min_size.value = defaultConfigPreset.risk_cluster_min_size;
+      form.elements.risk_cluster_window_hours.value = defaultConfigPreset.risk_cluster_window_hours;
+      form.elements.risk_register_ip_challenge.value = defaultConfigPreset.risk_register_ip_challenge;
+      form.elements.risk_register_ip_block.value = defaultConfigPreset.risk_register_ip_block;
+      form.elements.risk_register_window_hours.value = defaultConfigPreset.risk_register_window_hours;
       setStatus('已填充推荐默认值，请点击应用');
     };
     if (saveBtn) saveBtn.onclick = async () => {
@@ -11499,6 +12260,16 @@ function 生成安全管理后台注入代码() {
               const d = parseFloat(fd.get('register_duration') || '0');
               return (s && d > 0) ? new Date(new Date(s).getTime() + d * 3600000).toISOString().slice(0, 16) : null;
             })()
+          },
+          riskControl: {
+            enabled: fd.get('risk_enabled') === 'true',
+            accountSimilarityThreshold: Number(fd.get('risk_similarity_threshold') || 0.6),
+            usernameCharsetJaccardThreshold: Number(fd.get('risk_username_charset_threshold') || 0.5),
+            clusterMinSize: Number(fd.get('risk_cluster_min_size') || 3),
+            clusterWindowHours: Number(fd.get('risk_cluster_window_hours') || 72),
+            registerIpChallengeThreshold: Number(fd.get('risk_register_ip_challenge') || 3),
+            registerIpBlockThreshold: Number(fd.get('risk_register_ip_block') || 5),
+            registerWindowHours: Number(fd.get('risk_register_window_hours') || 24)
           }
         };
         await api('/admin/system/config.json', { method: 'POST', body: JSON.stringify(nextConfig) });
@@ -11700,6 +12471,29 @@ export const __adminPlus = {
 	安全预处理,
 	注入安全管理后台页面,
 	生成安全管理后台注入代码,
+	// ── 风控（薅羊毛防治）模块导出（供测试）──
+	安全风控计算设备指纹,
+	安全风控提取用户名特征,
+	安全风控提取邮箱特征,
+	安全风控字符集重合度,
+	安全风控编辑距离,
+	安全风控用户名相似度,
+	安全风控账号相似度,
+	安全风控提取账号风险标记,
+	安全风控创建并查集,
+	安全风控识别风险集群,
+	安全风控检查注册,
+	安全风控标记用户风险,
+	安全风控读取申诉白名单,
+	安全风控加入申诉白名单,
+	安全风控移除申诉白名单,
+	安全风控批量封禁集群,
+	安全风控获取报表列表,
+	安全构建用户风控信息,
+	安全执行用户管理动作,
+	安全批量执行用户管理动作,
+	安全设置用户订阅状态,
+	安全保存用户记录V2,
 };
 
 // ═══════════════════════════════════════════
