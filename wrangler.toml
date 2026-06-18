@@ -27,5 +27,9 @@ class_name = "TGVerifyDO"
 tag = "v1"
 new_classes = ["TGVerifyDO"]
 
+[[migrations]]
+tag = "v2"
+new_classes = ["StateStore"]
+
 [triggers]
 crons = ["0 */6 * * *"]
