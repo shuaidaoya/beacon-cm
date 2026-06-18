@@ -36,7 +36,7 @@ function 内存缓存按前缀清除(prefix) {
 function 内存缓存清除用户列表() {
 	内存缓存按前缀清除('list:');
 }
-class StateStore {
+export class StateStore {
 	constructor(state, env) {
 		this.storage = state.storage;
 		this.env = env;
