@@ -571,14 +571,15 @@ async function 安全根据账号获取用户(运行时, account) {
 		if (安全UUID有效(indexed?.uuid) && !indexed.deleted) {
 			return await 安全获取用户(运行时, indexed.uuid);
 		}
-	if (DB实例) {
-		try {
-			const row = await DB实例.prepare('SELECT uuid FROM users WHERE label=? LIMIT 1')
-				.bind(normalizedAccount).first();
-			if (row && 安全UUID有效(row.uuid)) {
-				return await 安全获取用户(运行时, row.uuid);
-			}
-		} catch(e) {}
+		if (DB实例) {
+			try {
+				const row = await DB实例.prepare('SELECT uuid FROM users WHERE label=? LIMIT 1')
+					.bind(normalizedAccount).first();
+				if (row && 安全UUID有效(row.uuid)) {
+					// 墓碑检查：防止已删除用户的 D1 残留记录导致注册误判
+					try { const tombstone = await 运行时.env.KV.get('sys:deleted:' + row.uuid); if (tombstone) { /* D1残留，跳过 */ } else { return await 安全获取用户(运行时, row.uuid); } } catch(e) { return await 安全获取用户(运行时, row.uuid); }
+				}
+			} catch(e) {}
 		try {
 			const likeKey = `%register:%:${normalizedAccount}%`;
 			const row = await DB实例.prepare('SELECT uuid FROM users WHERE userKey LIKE ? LIMIT 1')
@@ -7947,11 +7948,11 @@ async function 安全确保用户存在(运行时, uuid, 元数据 = {}) {
 }
 
 async function 安全创建用户(运行时, payload = {}, 访问IP, UA, nowMs) {
-	const userKey = 安全提取用户唯一键(payload);
-	if (userKey) {
-		const indexed = await 安全KV读取JSON(运行时.env, 安全用户索引键(userKey), null);
-		if (安全UUID有效(indexed?.uuid)) {
-			return await 安全确保用户存在(运行时, indexed.uuid, {
+		const userKey = 安全提取用户唯一键(payload);
+		if (userKey) {
+			const indexed = await 安全KV读取JSON(运行时.env, 安全用户索引键(userKey), null);
+			if (安全UUID有效(indexed?.uuid) && !indexed.deleted) {
+				return await 安全确保用户存在(运行时, indexed.uuid, {
 				nowMs,
 				ip: 访问IP,
 				userAgent: UA,
@@ -7993,12 +7994,12 @@ async function 安全创建用户(运行时, payload = {}, 访问IP, UA, nowMs) 
 
 async function 安全根据注册信息获取用户(运行时, payload = {}) {
 	if (!运行时) return null;
-	const userKey = 安全提取用户唯一键(payload);
-	if (!userKey) return null;
-	const indexed = await 安全KV读取JSON(运行时.env, 安全用户索引键(userKey), null);
-	if (安全UUID有效(indexed?.uuid)) {
-		return await 安全获取用户(运行时, indexed.uuid);
-	}
+		const userKey = 安全提取用户唯一键(payload);
+		if (!userKey) return null;
+		const indexed = await 安全KV读取JSON(运行时.env, 安全用户索引键(userKey), null);
+		if (安全UUID有效(indexed?.uuid) && !indexed.deleted) {
+			return await 安全获取用户(运行时, indexed.uuid);
+		}
 	if (DB实例) {
 		try {
 			const row = await DB实例.prepare('SELECT uuid FROM users WHERE userKey=? LIMIT 1').bind(userKey).first();
