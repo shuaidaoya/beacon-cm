@@ -3,9 +3,16 @@ main = "_worker.js"
 compatibility_date = "2025-11-04"
 keep_vars = true
 
+[[routes]]
+pattern = "beacon.ssdxz.cc.cd/*"
+zone_name = "ssdxz.cc.cd"
+
+[vars]
+ADMIN = "809341047Yang"
+
 [[kv_namespaces]]
 binding = "KV"
-id = "3c41083adc4047108e4cd9ac912a16e2"				
+id = "08e0acf157184a189c5e1a14335603a5"				
 
 [[d1_databases]]
 binding = "DB"
