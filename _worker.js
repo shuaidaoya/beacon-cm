@@ -8121,8 +8121,11 @@ async function 安全删除用户账号(运行时, uuid, meta = {}, nowMs = Date
 		profile: 安全提取用户展示信息(user),
 		lastIp: user.lastIp || null,
 	};
-	await 安全KV删除键(运行时.env, 安全用户前缀 + normalizedUuid);
-	if (userKey) await 安全KV删除键(运行时.env, 安全用户索引键(userKey));
+		await 安全KV删除键(运行时.env, 安全用户前缀 + normalizedUuid);
+		if (userKey) await 安全KV删除键(运行时.env, 安全用户索引键(userKey));
+		// 清理 V2 索引（register:hash:account，不含 email，避免注册时误判已存在）
+		const v2Key = user.label ? 安全生成注册用户键V2(user.label) : null;
+		if (v2Key) await 安全KV删除键(运行时.env, 安全用户索引键(v2Key));
 	await 安全KV删除键(运行时.env, 安全用户木马索引键(sha224(normalizedUuid)));
 	await 安全KV删除键(运行时.env, 安全订阅状态键(normalizedUuid));
 	await 安全KV删除键(运行时.env, 安全活跃封禁键('uuid', normalizedUuid));
