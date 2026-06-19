@@ -9888,6 +9888,10 @@ button[disabled]{opacity:.6;cursor:not-allowed}
 .sub-copy-body p{margin:0 0 10px}
 .sub-copy-code{display:flex;align-items:center;gap:8px;margin:10px 0;padding:10px 12px;background:#020817;border:1px dashed rgba(99,102,241,.4);border-radius:10px;color:#93c5fd;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;word-break:break-all}
 .sub-copy-code .tag{flex-shrink:0;padding:2px 8px;border-radius:6px;background:rgba(59,130,246,.16);color:#bfdbfe;font-size:11px;font-weight:700}
+.sub-copy-code .sub-copy-url{flex:1;min-width:0}
+.sub-copy-url-btn{flex-shrink:0;border:1px solid rgba(99,102,241,.4);background:rgba(59,130,246,.14);color:#bfdbfe;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s;white-space:nowrap}
+.sub-copy-url-btn:hover{background:rgba(59,130,246,.28);border-color:rgba(99,102,241,.6)}
+.sub-copy-url-btn.copied{background:rgba(34,197,94,.2);border-color:rgba(34,197,94,.5);color:#86efac}
 .sub-copy-note{font-size:12px;color:#94a3b8;line-height:1.6;margin:10px 0 0}
 .sub-copy-actions{display:flex;gap:10px;margin-top:18px}
 .sub-copy-actions .copy-btn{flex:1;justify-content:center;display:inline-flex;align-items:center}
@@ -10248,7 +10252,7 @@ function openSubCopyMask(value, originButton) {
       '<div class="sub-copy-body">' +
         '<p>本订阅部署在 Cloudflare 上，而 CF Workers 默认<strong style="color:#fbbf24">不允许访问自身所托管的网络</strong>。多数代理软件默认用 CF 链接测延迟，会导致测延迟全部显示为超时（红），但实际并不影响代理使用。</p>' +
         '<p>请在代理软件的<strong style="color:#93c5fd">测延迟 URL / 健康检查地址</strong>处改为下方链接：</p>' +
-        '<div class="sub-copy-code"><span class="tag">测延迟</span>' + LATENCY_TEST_URL + '</div>' +
+        '<div class="sub-copy-code"><span class="tag">测延迟</span><span class="sub-copy-url">' + LATENCY_TEST_URL + '</span><button type="button" class="sub-copy-url-btn" id="sub-copy-url-btn">📋 复制</button></div>' +
         '<p class="sub-copy-note">修改完成后再复制订阅地址导入。请阅读 <strong style="color:#f8fafc">' + LATENCY_READ_SECONDS + '</strong> 秒后方可继续复制。</p>' +
       '</div>' +
       '<div class="sub-copy-actions">' +
@@ -10276,6 +10280,13 @@ function openSubCopyMask(value, originButton) {
 
   cancelBtn.onclick = closeSubCopyMask;
   mask.onclick = (event) => { if (event.target === mask) closeSubCopyMask(); };
+  const urlBtn = mask.querySelector('#sub-copy-url-btn');
+  urlBtn.onclick = async () => {
+    try { await copyTextToClipboard(LATENCY_TEST_URL); } catch {}
+    urlBtn.classList.add('copied');
+    urlBtn.textContent = '✓ 已复制';
+    setTimeout(() => { urlBtn.classList.remove('copied'); urlBtn.textContent = '📋 复制'; }, 1500);
+  };
   confirmBtn.onclick = async () => {
     if (confirmBtn.disabled) return;
     try {
