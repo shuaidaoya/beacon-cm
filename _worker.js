@@ -1336,8 +1336,7 @@ export default {
 					const 设备指纹2 = 安全风控计算设备指纹(访问IP, UA);
 					const 风控标记2 = 安全风控提取账号风险标记({ profile: { account: pending.account, email: pending.email }, traffic: user.traffic, used_traffic: user.used_traffic, attributes: user.attributes }, 当前安全配置);
 					await 安全风控标记用户风险(运行时, user, { registerIp: 访问IP, deviceFp: 设备指纹2, flags: 风控标记2 });
-					// 同步写入用户记录 + TG 绑定索引（三步尽量原子；任一失败记日志但不回滚，
-					// 因 tg_bind 缺失可由 安全解析TG绑定 的 D1 回退自动重建）
+					// 同步写入用户记录 + TG 绑定索引
 					try {
 						await 安全保存用户记录V2(运行时, user);
 						await 安全KV写入JSON(运行时.env, 安全TG绑定键(verifyRecord.tgUserId), {
@@ -1346,16 +1345,22 @@ export default {
 							tgUsername: verifyRecord.tgUsername,
 							account: pending.account,
 							boundAt: Date.now(),
-						}); // 永久，无 TTL（tg_bind 不再过期，删除用户时由 安全删除用户账号 清理）
-						// 建立反向KV索引 tg_user:{uuid}
+						}); // 永久，无 TTL
 						await 安全KV写入JSON(运行时.env, 安全TG用户键(user.uuid), {
 							uuid: user.uuid,
 							tgUserId: verifyRecord.tgUserId,
 							tgUsername: verifyRecord.tgUsername,
 							boundAt: Date.now(),
 						});
+						// 三步全部成功 → 清理验证记录
+						try { await 运行时.env.KV.delete(安全TG验证键(code)); } catch(e) {}
 					} catch(e) {
-						console.error('[注册] TG绑定写入失败 uuid=' + user.uuid + ':', e.message, '（tg_bind 可由 D1 回退自动重建）');
+						console.error('[注册] TG绑定写入失败 uuid=' + user.uuid + ':', e.message, '（用户已创建但无 tgUserId，验证码保留，前端重试后可补写）');
+						return 认证JSON响应('AUTH_TG_BIND_SAVE_FAILED', 'TG账号验证成功但绑定数据写入失败，请稍后重试。', {
+							account: pending.account,
+							nextMode: 'retry_tg_bind',
+							user: { uuid: user.uuid },
+						}, 500);
 					}
 					// 注册日志异步写入（D1过载不阻塞响应）
 					安全记录注册日志(运行时, 'success_tg_verified', user.uuid, 访问IP, UA, {
@@ -1364,8 +1369,6 @@ export default {
 						tgUsername: verifyRecord.tgUsername,
 						memberStatus: verifyRecord.memberStatus,
 					}, 安全当前时间(env));
-					// 清理验证记录
-					try { await 运行时.env.KV.delete(安全TG验证键(code)); } catch(e) {}
 					return 认证JSON响应('AUTH_SIGNUP_SUCCESS', 'TG验证通过，注册成功！已切换到登录模式，请直接登录。', {
 						account: pending.account,
 						nextMode: 'signin',
@@ -1373,8 +1376,7 @@ export default {
 						tgBound: true,
 						tgUsername: verifyRecord.tgUsername,
 					}, 201);
-				}
-				// duplicate状态
+				}	// end verified
 				if (verifyRecord.status === 'duplicate') {
 					return 认证JSON响应('AUTH_TG_DUPLICATE', '该TG账号已被其他用户绑定。', {
 						duplicateUuid: verifyRecord.duplicateUuid,
@@ -1993,7 +1995,7 @@ if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
 					// purge-ghosts / repair-tg-bindings 支持 ?key=管理员密码 备用鉴权（供脚本调用，绕过 cookie+UA 绑定）
-					const keyAuthPath = (访问路径 === 'admin/system/purge-ghosts' || 访问路径 === 'admin/system/repair-tg-bindings');
+					const keyAuthPath = (访问路径 === 'admin/system/purge-ghosts' || 访问路径 === 'admin/system/repair-tg-bindings' || 访问路径 === 'admin/system/users/set-tg');
 					const keyAuthValue = keyAuthPath ? url.searchParams.get('key') : null;
 					const purgeGhostsAuthed = keyAuthValue && 管理员密码 && keyAuthValue === 管理员密码;
 					// 没有cookie或cookie错误，跳转到/login页面
@@ -9330,19 +9332,66 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 		return 安全JSON响应({ success: true, user });
 	}
 
-	if (pathname === '/admin/system/users/batch' && request.method === 'POST') {
-		const payload = await request.json().catch(() => ({}));
-		const action = String(payload.action || '').trim();
-		const uuids = Array.isArray(payload.uuids) ? payload.uuids : [];
-		if (!['ban', 'disable', 'restore', 'reset-subscription', 'delete'].includes(action)) return 安全JSON响应({ success: false, error: 'action 不支持' }, 400);
-		if (!uuids.length) return 安全JSON响应({ success: false, error: 'uuids 不能为空' }, 400);
-		const result = await 安全批量执行用户管理动作(运行时, url, action, uuids, {
-			ip: 访问IP,
-			reason: payload.reason || 'admin-batch',
-			source: 'admin-api',
-		}, nowMs);
-		return 安全JSON响应({ success: true, ...result });
-	}
+		if (pathname === '/admin/system/users/batch' && request.method === 'POST') {
+			const payload = await request.json().catch(() => ({}));
+			const action = String(payload.action || '').trim();
+			const uuids = Array.isArray(payload.uuids) ? payload.uuids : [];
+			if (!['ban', 'disable', 'restore', 'reset-subscription', 'delete'].includes(action)) return 安全JSON响应({ success: false, error: 'action 不支持' }, 400);
+			if (!uuids.length) return 安全JSON响应({ success: false, error: 'uuids 不能为空' }, 400);
+			const result = await 安全批量执行用户管理动作(运行时, url, action, uuids, {
+				ip: 访问IP,
+				reason: payload.reason || 'admin-batch',
+				source: 'admin-api',
+			}, nowMs);
+			return 安全JSON响应({ success: true, ...result });
+		}
+
+		// ── 管理员补填 TG 绑定：为已注册用户设置 tgUserId（修复注册回填失败的残缺用户）──
+		// POST /admin/system/users/set-tg
+		// { uuid, tgUserId, tgUsername? }
+		if (pathname === '/admin/system/users/set-tg' && request.method === 'POST') {
+			const payload = await request.json().catch(() => ({}));
+			const nUuid = String(payload.uuid || '').toLowerCase();
+			if (!安全UUID有效(nUuid)) return 安全JSON响应({ success: false, error: 'uuid 不能为空且必须合法' }, 400);
+			const tgUserId = payload.tgUserId;
+			if (tgUserId == null) return 安全JSON响应({ success: false, error: 'tgUserId 不能为空' }, 400);
+			const user = await 安全获取用户(运行时, nUuid);
+			if (!user) return 安全JSON响应({ success: false, error: '未找到对应用户' }, 404);
+			// 检查 tg_bind 是否已被占用
+			const existingBind = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgUserId), null);
+			if (existingBind && existingBind.uuid && existingBind.uuid !== nUuid) {
+				return 安全JSON响应({ success: false, error: '该 TG 账号已绑定其他用户', conflictUuid: existingBind.uuid }, 409);
+			}
+			try {
+				// 写入 attributes
+				user.attributes = user.attributes || {};
+				user.attributes.tgUserId = tgUserId;
+				if (payload.tgUsername) user.attributes.tgUsername = payload.tgUsername;
+				// 如果 tg_bind 已存在且 uuid 匹配，跳过写入（幂等）
+				if (existingBind && existingBind.uuid === nUuid) {
+					await 安全保存用户记录V2(运行时, user);
+					return 安全JSON响应({ success: true, status: 'already_bound', uuid: nUuid, tgUserId });
+				}
+				// 重建 tg_bind + tg_user（永久，无 TTL）
+				await 安全保存用户记录V2(运行时, user);
+				await 安全KV写入JSON(运行时.env, 安全TG绑定键(tgUserId), {
+					uuid: nUuid, tgUserId,
+					tgUsername: payload.tgUsername || user.attributes.tgUsername || null,
+					account: user.label || null,
+					boundAt: Date.now(),
+				});
+				await 安全KV写入JSON(运行时.env, 安全TG用户键(nUuid), {
+					uuid: nUuid, tgUserId,
+					tgUsername: payload.tgUsername || user.attributes.tgUsername || null,
+					boundAt: Date.now(),
+				});
+				失效用户缓存(nUuid);
+				return 安全JSON响应({ success: true, status: 'bound', uuid: nUuid, tgUserId });
+			} catch(e) {
+				console.error('[管理员补填TG] 失败 uuid=' + nUuid + ':', e.message);
+				return 安全JSON响应({ success: false, error: '写入失败: ' + e.message }, 500);
+			}
+		}
 
 	// ── KV 残留用户清理：以 D1 为真相源，KV 有 sys:user:<uuid> 但 D1 没有 = 残留 ──
 	// 当年 bcpurgeall 对 D1 执行 DELETE FROM users（全表清空成功），但 KV 循环逐条 delete 受限流/
