@@ -9326,6 +9326,24 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 				doOrphansPurged++;
 			} catch(e) { console.error('[清DO镜像] 失败 uuid=' + doUuid + ':', e.message); }
 		}
+		// ── KV.list 空壳扫描：清除 KV list 索引残留的空壳 sys:user: key ──
+		// 当年 bcpurgeall 裸 KV.delete 后，Cloudflare KV list 索引（最终一致性）仍列出这些 key，
+		// 但 KV.get 返回 null。安全统计键数量 的 KV 回退只数 page.keys.length 不查值 → D1 卡顿时
+		// 计数回退 KV.list 虚高成"一千多"（列表因 KV.get 过滤 null 仍正常）。这是计数虚高的直接根因。
+		let kvListScanned = 0, kvReal = 0, kvShellsPurged = 0;
+		let kvCursor;
+		do {
+			const kvPage = await 运行时.env.KV.list({ prefix: 安全用户前缀, limit: 1000, cursor: kvCursor });
+			for (const k of (kvPage.keys || [])) {
+				kvListScanned++;
+				const val = await 运行时.env.KV.get(k.name);
+				if (val) { kvReal++; continue; } // KV 有值 = 真实 key，保留
+				// KV.get 返回 null = 空壳 key（list 索引残留），重新删除
+				if (dryRun) { kvShellsPurged++; continue; }
+				try { await 运行时.env.KV.delete(k.name); kvShellsPurged++; } catch(e) { console.error('[清KV空壳] 失败 key=' + k.name + ':', e.message); }
+			}
+			kvCursor = (!kvPage.list_complete && kvPage.cursor) ? kvPage.cursor : null;
+		} while (kvCursor);
 		return 安全JSON响应({
 			success: true,
 			dryRun,
@@ -9336,6 +9354,11 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 			doScanned,
 			doReal,
 			doOrphansPurged,
+			kvListScanned,
+			kvReal,
+			kvShellsPurged,
+			// 注意：KV list 索引是最终一致的，删除后 list 不会立即移除该 key，可能需数小时同步
+			kvListNote: 'KV list 索引最终一致，清理后需等待数小时复查',
 		});
 	}
 
