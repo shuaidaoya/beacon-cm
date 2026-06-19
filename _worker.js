@@ -9287,11 +9287,15 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 		const d1UuidSet = new Set((rows?.results || []).map(r => String(r.uuid || '').toLowerCase()).filter(Boolean));
 		// 2. KV.list 分页列出所有 sys:user: key，比对出残留（~2 子请求/页）
 		const staleKeys = [];
-		let kvStaleScanned = 0, kvCursor;
+		const seenKeys = new Set(); // 去重（KV.list 最终一致性可能重复列出同一 key）
+		let kvStaleScanned = 0, kvCursor, kvListPages = 0;
 		do {
 			const kvPage = await 运行时.env.KV.list({ prefix: 安全用户前缀, limit: 1000, cursor: kvCursor });
+			kvListPages++;
 			for (const k of (kvPage.keys || [])) {
 				kvStaleScanned++;
+				if (seenKeys.has(k.name)) continue; // 跳过重复
+				seenKeys.add(k.name);
 				const staleUuid = k.name.slice(安全用户前缀.length).toLowerCase();
 				if (!d1UuidSet.has(staleUuid)) staleKeys.push(k.name); // D1 没有 = 残留
 			}
@@ -9368,6 +9372,9 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 			kvStaleScanned, kvStaleReal, kvStalePurged, failed,
 			remaining, hasMore: remaining > 0,
 			batchSize: batch.length,
+			staleKeysLength: staleKeys.length,
+			kvListPages,
+			batchLimit,
 			debug,
 			kvListNote: 'KV list 索引最终一致，清理后需等待数小时复查；hasMore=true 时重复调用直至 false',
 		});
