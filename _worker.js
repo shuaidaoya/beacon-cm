@@ -9440,14 +9440,16 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 		const dryRun = String(url.searchParams.get('dryRun') || '').toLowerCase() === 'true' || url.searchParams.get('dryRun') === '1';
 		const rawLimit = url.searchParams.get('limit');
 		const batchLimit = rawLimit == null ? 5 : Math.min(Math.max(安全数值(rawLimit, 5, 1, 100), 1), 100);
+		const offset = Math.max(0, 安全数值(url.searchParams.get('offset'), 0, 0, 100000));
 		const rows = await DB实例.prepare('SELECT uuid, label, source, attributes FROM users').all();
 		const allRows = (rows?.results || []);
-		// 筛选需要检查的用户：有 tgUserId 或 source=tg-verified
-		const candidates = allRows.filter(r => {
+		// 筛选需要检查的用户：有 tgUserId 或 source=tg-verified，按 uuid 稳定排序后分页
+		const allCandidates = allRows.filter(r => {
 			let attr = {};
 			try { attr = JSON.parse(r.attributes || '{}'); } catch(e) {}
 			return attr.tgUserId || r.source === 'register-panel-tg-verified';
-		}).slice(0, batchLimit);
+		}).sort((a, b) => String(a.uuid).localeCompare(String(b.uuid)));
+		const candidates = allCandidates.slice(offset, offset + batchLimit);
 		let scanned = 0, repaired = 0, conflicts = 0, anomalies = 0, skipped = 0;
 		const conflictList = [], anomalyList = [];
 		for (const row of candidates) {
@@ -9482,15 +9484,12 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 				repaired++;
 			} catch(e) { console.error('[修复TG绑定] 失败 uuid=' + row.uuid + ':', e.message); conflicts++; }
 		}
-		const remaining = allRows.filter(r => {
-			let attr = {}; try { attr = JSON.parse(r.attributes || '{}'); } catch(e) {}
-			return attr.tgUserId || r.source === 'register-panel-tg-verified';
-		}).length;
+		const nextOffset = offset + scanned;
+		const remaining = Math.max(0, allCandidates.length - nextOffset);
 		return 安全JSON响应({
 			success: true, dryRun,
 			scanned, repaired, conflicts, anomalies, skipped,
-			remaining: Math.max(0, remaining - scanned),
-			hasMore: (remaining - scanned) > 0,
+			offset, nextOffset, remaining, hasMore: remaining > 0,
 			conflictList: conflictList.slice(0, 10),
 			anomalyList: anomalyList.slice(0, 10),
 			note: 'repaired=重建缺失的tg_bind；conflicts=tg_bind指向其他用户(需人工)；anomalies=tg-verified但无tgUserId(需人工)；skipped=已一致',
