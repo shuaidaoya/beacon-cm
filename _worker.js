@@ -645,6 +645,66 @@ async function 安全根据邮箱获取用户(运行时, email) {
 	return null;
 }
 
+// ── 按 TG 用户 ID 查找用户（tg_bind KV 失效时的 D1 回退）──
+// 用 D1 attributes LIKE 反查，因 tgUserId 存在 attributes JSON 列里（无独立列）
+async function 安全按TG用户ID获取用户(运行时, tgUserId) {
+	if (!运行时 || tgUserId == null) return null;
+	const tgId = String(tgUserId);
+	if (!tgId) return null;
+	// D1: attributes LIKE '%"tgUserId":"<tgId>"%'（精确匹配该字段值，避免子串误匹配）
+	if (DB实例) {
+		try {
+			const row = await DB实例.prepare("SELECT uuid FROM users WHERE attributes LIKE ? LIMIT 1")
+				.bind('%"tgUserId":"' + tgId + '"%').first();
+			if (row && 安全UUID有效(row.uuid)) {
+				// 墓碑检查：防止已删除用户的 D1 残留
+				try {
+					const tombstone = await 运行时.env.KV.get('sys:deleted:' + row.uuid);
+					if (tombstone) return null;
+				} catch(e) {}
+				const user = await 安全获取用户(运行时, row.uuid);
+				// 二次确认 attributes.tgUserId 确实匹配（防 LIKE 误匹配）
+				if (user && String(user.attributes?.tgUserId || user.tgUserId || '') === tgId) return user;
+			}
+		} catch(e) { console.error('[按TG查用户] D1查询失败:', e.message); }
+	}
+	return null;
+}
+
+// ── 解析 TG 绑定：先读 tg_bind KV，缺失时回退 D1 并自动重建绑定索引 ──
+// 返回 { user, bindRecord, rebuilt } 或 null（未绑定）。rebuilt=true 表示绑定是回退重建的。
+async function 安全解析TG绑定(运行时, tgUserId) {
+	if (!运行时 || tgUserId == null) return null;
+	const tgId = Number(tgUserId);
+	// 1. 先读 tg_bind KV
+	const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgId), null);
+	if (bindRecord && bindRecord.uuid) {
+		const user = await 安全获取用户(运行时, bindRecord.uuid);
+		if (user) return { user, bindRecord, rebuilt: false };
+	}
+	// 2. tg_bind 缺失或用户不存在 → 回退 D1 按 attributes.tgUserId 反查
+	const user = await 安全按TG用户ID获取用户(运行时, tgId);
+	if (!user || !安全UUID有效(user.uuid)) return null;
+	const realTgId = user.attributes?.tgUserId || user.tgUserId;
+	if (!realTgId || String(realTgId) !== String(tgId)) return null;
+	// 3. D1 找到绑定 → 自动重建 tg_bind + tg_user（永久，无 TTL）
+	const rebuiltRecord = {
+		uuid: user.uuid,
+		tgUserId: realTgId,
+		tgUsername: user.attributes?.tgUsername || user.tgUsername || null,
+		account: user.label || null,
+		boundAt: bindRecord?.boundAt || Date.now(),
+	};
+	try {
+		await 安全KV写入JSON(运行时.env, 安全TG绑定键(realTgId), rebuiltRecord);
+		await 安全KV写入JSON(运行时.env, 安全TG用户键(user.uuid), {
+			tgUserId: realTgId, tgUsername: rebuiltRecord.tgUsername, uuid: user.uuid,
+		});
+		console.log('[TG绑定重建] tgId=' + tgId + ' uuid=' + user.uuid + '（tg_bind KV 缺失，从 D1 回退重建）');
+	} catch(e) { console.error('[TG绑定重建] 失败 tgId=' + tgId + ':', e.message); }
+	return { user, bindRecord: rebuiltRecord, rebuilt: true };
+}
+
 // ── 速率限制（登录失败）──
 async function 安全检查登录速率限制(运行时, ip) {
 	if (!运行时?.env?.KV || !ip) return { blocked: false };
@@ -1263,12 +1323,10 @@ export default {
 						passwordSet: 1,
 						passwordUpdatedAt: 安全当前时间(env),
 						source: 'register-panel-tg-verified',
-						tgUserId: verifyRecord.tgUserId,
-						tgUsername: verifyRecord.tgUsername,
 					};
 					if (pending.email) newUserPayload.email = pending.email;
 					const user = await 安全创建用户(运行时, newUserPayload, 访问IP, UA, 安全当前时间(env));
-					// 将TG信息写入用户attributes以持久化到KV/D1
+					// 将TG信息写入用户attributes以持久化到KV/D1（tgUserId 不进顶层，D1 无独立列）
 					user.attributes = user.attributes || {};
 					user.attributes.tgUserId = verifyRecord.tgUserId;
 					user.attributes.tgUsername = verifyRecord.tgUsername;
@@ -1278,23 +1336,27 @@ export default {
 					const 设备指纹2 = 安全风控计算设备指纹(访问IP, UA);
 					const 风控标记2 = 安全风控提取账号风险标记({ profile: { account: pending.account, email: pending.email }, traffic: user.traffic, used_traffic: user.used_traffic, attributes: user.attributes }, 当前安全配置);
 					await 安全风控标记用户风险(运行时, user, { registerIp: 访问IP, deviceFp: 设备指纹2, flags: 风控标记2 });
-					// 同步写入用户记录 + V2 索引（KV+D1），确保注册完成后立即可登录
-					// 注意：必须 await，否则 V2 索引未写入时登录查重会查不到用户
-					await 安全保存用户记录V2(运行时, user);
-					await 安全KV写入JSON(运行时.env, 安全TG绑定键(verifyRecord.tgUserId), {
-						uuid: user.uuid,
-						tgUserId: verifyRecord.tgUserId,
-						tgUsername: verifyRecord.tgUsername,
-						account: pending.account,
-						boundAt: Date.now(),
-					}, 365 * 24 * 3600);
-					// 建立反向KV索引 tg_user:{uuid}
-					await 安全KV写入JSON(运行时.env, 安全TG用户键(user.uuid), {
-						uuid: user.uuid,
-						tgUserId: verifyRecord.tgUserId,
-						tgUsername: verifyRecord.tgUsername,
-						boundAt: Date.now(),
-					}, 365 * 24 * 3600);
+					// 同步写入用户记录 + TG 绑定索引（三步尽量原子；任一失败记日志但不回滚，
+					// 因 tg_bind 缺失可由 安全解析TG绑定 的 D1 回退自动重建）
+					try {
+						await 安全保存用户记录V2(运行时, user);
+						await 安全KV写入JSON(运行时.env, 安全TG绑定键(verifyRecord.tgUserId), {
+							uuid: user.uuid,
+							tgUserId: verifyRecord.tgUserId,
+							tgUsername: verifyRecord.tgUsername,
+							account: pending.account,
+							boundAt: Date.now(),
+						}); // 永久，无 TTL（tg_bind 不再过期，删除用户时由 安全删除用户账号 清理）
+						// 建立反向KV索引 tg_user:{uuid}
+						await 安全KV写入JSON(运行时.env, 安全TG用户键(user.uuid), {
+							uuid: user.uuid,
+							tgUserId: verifyRecord.tgUserId,
+							tgUsername: verifyRecord.tgUsername,
+							boundAt: Date.now(),
+						});
+					} catch(e) {
+						console.error('[注册] TG绑定写入失败 uuid=' + user.uuid + ':', e.message, '（tg_bind 可由 D1 回退自动重建）');
+					}
 					// 注册日志异步写入（D1过载不阻塞响应）
 					安全记录注册日志(运行时, 'success_tg_verified', user.uuid, 访问IP, UA, {
 						account: pending.account,
@@ -1930,9 +1992,10 @@ if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
  				} else if (访问路径 === 'admin' || 访问路径.startsWith('admin/')) {//验证cookie后响应管理页面
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
-					// purge-ghosts 支持 ?key=管理员密码 备用鉴权（供脚本调用，绕过 cookie+UA 绑定）
-					const purgeGhostsKey = (访问路径 === 'admin/system/purge-ghosts') ? url.searchParams.get('key') : null;
-					const purgeGhostsAuthed = purgeGhostsKey && 管理员密码 && purgeGhostsKey === 管理员密码;
+					// purge-ghosts / repair-tg-bindings 支持 ?key=管理员密码 备用鉴权（供脚本调用，绕过 cookie+UA 绑定）
+					const keyAuthPath = (访问路径 === 'admin/system/purge-ghosts' || 访问路径 === 'admin/system/repair-tg-bindings');
+					const keyAuthValue = keyAuthPath ? url.searchParams.get('key') : null;
+					const purgeGhostsAuthed = keyAuthValue && 管理员密码 && keyAuthValue === 管理员密码;
 					// 没有cookie或cookie错误，跳转到/login页面
 					if (!purgeGhostsAuthed && (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码))) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
 					if (访问路径 === 'admin/system' || 访问路径.startsWith('admin/system/')) {
@@ -4533,15 +4596,20 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 	// ── 查看自己的TG ID ──
 	if (匹配命令('bnwhoami') || 匹配中文('我是谁')) {
 		if (!tgFrom?.id) return '⚠️ 无法识别用户身份。';
-		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgFrom.id), null)
-			|| await 安全KV读取JSON(运行时.env, 安全TG绑定键(String(tgFrom.id)), null)
-			|| await 安全KV读取JSON(运行时.env, 安全TG绑定键(Number(tgFrom.id)), null);
-		const bound = bindRecord?.uuid ? '已绑定账号' : '未绑定';
+		const 解析 = await 安全解析TG绑定(运行时, tgFrom.id);
+		const bound = 解析?.user ? '已绑定账号' : '未绑定';
+		let extra = '';
+		if (解析?.user) {
+			extra = '\n<b>绑定账号：</b>' + (解析.bindRecord.account || 解析.user.label || '未知');
+			// 活跃节点续期 tg_bind
+			try { await 安全KV写入JSON(运行时.env, 安全TG绑定键(tgFrom.id), 解析.bindRecord); } catch(e) {}
+		} else {
+			extra = '\n\n💡 请先通过注册页面获取验证码，在群内发送 <code>/bnbind 验证码</code> 或 <code>绑定 验证码</code> 完成绑定。';
+		}
 		return '<b>🆔 您的 Telegram 信息</b>\n\n' +
 			'<b>TG ID：</b><code>' + tgFrom.id + '</code>\n' +
 			'<b>TG用户名：</b>' + (tgFrom.username ? '@' + tgFrom.username : '未设置') + '\n' +
-			'<b>绑定状态：</b>' + bound + '\n\n' +
-			(bindRecord?.uuid ? '' : '💡 请先通过注册页面获取验证码，在群内发送 <code>/bnbind 验证码</code> 完成绑定。');
+			'<b>绑定状态：</b>' + bound + extra;
 	}
 
 	if (匹配命令('bnhelp') || 匹配命令('bchelp') || cmd === '/start' || 匹配中文('帮助')) {
@@ -4567,15 +4635,17 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 		if (匹配命令('bncheckin') || 匹配中文('签到')) {
 			if (!tgFrom || !tgFrom.id) return '⚠️ 无法识别用户身份。';
 			const tgUserId = tgFrom.id;
-			const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgUserId), null);
-			if (!bindRecord || !bindRecord.uuid) return '⚠️ 您尚未绑定账号，请先在注册页面完成TG验证。';
+			const 解析 = await 安全解析TG绑定(运行时, tgUserId);
+			if (!解析 || !解析.user) return '⚠️ 您尚未绑定账号，请先在注册页面完成TG验证。';
+			const bindRecord = 解析.bindRecord;
 			失效用户缓存(bindRecord.uuid);
-			const user = await 安全获取用户(运行时, bindRecord.uuid);
-			if (!user) return '⚠️ 绑定的账号不存在。';
+			const user = 解析.user;
 			if (安全用户已封禁(user)) return '🚫 您的账号已被封禁，无法签到。';
 			const nowMs = Date.now();
 			// 统一使用 安全执行每日签到，与 Web 端共享签到状态
 			const 签到结果 = await 安全执行每日签到(运行时, user, { ip: 'tg-bot', source: 'tg-bot' }, nowMs);
+			// 活跃节点续期 tg_bind（刷新 DO/内存缓存，保持绑定健康）
+			try { await 安全KV写入JSON(运行时.env, 安全TG绑定键(tgUserId), bindRecord); } catch(e) {}
 			if (!签到结果.ok) {
 				if (签到结果.code === 'CHECKIN_ALREADY_CLAIMED') {
 					const info = 签到结果.checkin || {};
@@ -4596,11 +4666,10 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 	// ── TG 查询流量命令 ──
 	if (匹配命令('bntraffic') || 匹配中文('流量')) {
 		if (!tgFrom || !tgFrom.id) return '⚠️ 无法识别用户身份。';
-		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgFrom.id), null);
-		if (!bindRecord || !bindRecord.uuid) return '⚠️ 您尚未绑定账号。';
-		失效用户缓存(bindRecord.uuid);
-		const user = await 安全获取用户(运行时, bindRecord.uuid);
-		if (!user) return '⚠️ 绑定的账号不存在。';
+		const 解析 = await 安全解析TG绑定(运行时, tgFrom.id);
+		if (!解析 || !解析.user) return '⚠️ 您尚未绑定账号。';
+		失效用户缓存(解析.bindRecord.uuid);
+		const user = 解析.user;
 		if (安全用户已封禁(user)) return '🚫 您的账号已被封禁。';
 		const totalBytes = user.traffic || 0, usedBytes = user.used_traffic || 0, remainingBytes = Math.max(0, totalBytes - usedBytes);
 		const fmt = (b) => { if (!b || b <= 0) return '0 B'; const k = 1024, u = ['B','KB','MB','GB','TB']; const i = Math.floor(Math.log(b)/Math.log(k)); return parseFloat((b/Math.pow(k,i)).toFixed(1)) + ' ' + u[i]; };
@@ -4618,16 +4687,15 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 	// ── TG 账户状态命令 ──
 	if (匹配命令('bnstatus') || 匹配中文('状态')) {
 		if (!tgFrom || !tgFrom.id) return '⚠️ 无法识别用户身份。';
-		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgFrom.id), null);
-		if (!bindRecord || !bindRecord.uuid) return '⚠️ 您尚未绑定账号，请先在注册页面完成TG验证。';
-		失效用户缓存(bindRecord.uuid);
-		const user = await 安全获取用户(运行时, bindRecord.uuid);
-		if (!user) return '⚠️ 绑定的账号不存在。';
+		const 解析 = await 安全解析TG绑定(运行时, tgFrom.id);
+		if (!解析 || !解析.user) return '⚠️ 您尚未绑定账号，请先在注册页面完成TG验证。';
+		失效用户缓存(解析.bindRecord.uuid);
+		const user = 解析.user;
 		const account = 提取账号(user);
 		const banned = 安全用户已封禁(user);
 		const totalBytes = user.traffic || 0, usedBytes = user.used_traffic || 0;
 		const fmt = (b) => { if (!b || b <= 0) return '0 B'; const k = 1024, u = ['B','KB','MB','GB','TB']; const i = Math.floor(Math.log(b)/Math.log(k)); return parseFloat((b/Math.pow(k,i)).toFixed(1)) + ' ' + u[i]; };
-		const tgRecord = bindRecord;
+		const tgRecord = 解析.bindRecord;
 		const today = new Date(Date.now() + 8*3600*1000).toISOString().slice(0, 10);
 		const lastCheckinDay = tgRecord.lastCheckIn ? new Date(tgRecord.lastCheckIn + 8*3600*1000).toISOString().slice(0, 10) : null;
 		const checkedInToday = lastCheckinDay === today;
@@ -9363,6 +9431,72 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 		});
 	}
 
+	// ── TG 绑定一致性修复：重建缺失的 tg_bind/tg_user 索引，报告异常用户 ──
+	// 遍历 D1 users，对有 attributes.tgUserId 但缺 tg_bind 的重建绑定（去 TTL）；
+	// tg_bind 存在但 uuid 不一致的报告冲突；source=tg-verified 但无 tgUserId 的报告异常。
+	// ?key= 鉴权 + ?dryRun= 预览 + ?limit= 分批（默认5，串行规避6连接限制）
+	if (pathname === '/admin/system/repair-tg-bindings') {
+		if (!DB实例) return 安全JSON响应({ success: false, error: 'D1 未就绪' }, 503);
+		const dryRun = String(url.searchParams.get('dryRun') || '').toLowerCase() === 'true' || url.searchParams.get('dryRun') === '1';
+		const rawLimit = url.searchParams.get('limit');
+		const batchLimit = rawLimit == null ? 5 : Math.min(Math.max(安全数值(rawLimit, 5, 1, 100), 1), 100);
+		const rows = await DB实例.prepare('SELECT uuid, label, source, attributes FROM users').all();
+		const allRows = (rows?.results || []);
+		// 筛选需要检查的用户：有 tgUserId 或 source=tg-verified
+		const candidates = allRows.filter(r => {
+			let attr = {};
+			try { attr = JSON.parse(r.attributes || '{}'); } catch(e) {}
+			return attr.tgUserId || r.source === 'register-panel-tg-verified';
+		}).slice(0, batchLimit);
+		let scanned = 0, repaired = 0, conflicts = 0, anomalies = 0, skipped = 0;
+		const conflictList = [], anomalyList = [];
+		for (const row of candidates) {
+			scanned++;
+			let attr = {};
+			try { attr = JSON.parse(row.attributes || '{}'); } catch(e) {}
+			const tgUserId = attr.tgUserId;
+			const source = row.source;
+			if (!tgUserId) {
+				// source=tg-verified 但无 tgUserId → 异常（无法自动补 tgId）
+				anomalies++; anomalyList.push({ uuid: row.uuid, label: row.label, source });
+				continue;
+			}
+			// 查 tg_bind 是否存在
+			const existing = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgUserId), null);
+			if (existing && existing.uuid && existing.uuid !== row.uuid) {
+				// tg_bind 指向别的用户 → 冲突，不自动改
+				conflicts++; conflictList.push({ uuid: row.uuid, label: row.label, tgUserId, conflictUuid: existing.uuid });
+				continue;
+			}
+			if (existing && existing.uuid === row.uuid) { skipped++; continue; } // 已一致，跳过
+			// tg_bind 缺失 → 重建（去 TTL 永久）
+			if (dryRun) { repaired++; continue; }
+			try {
+				await 安全KV写入JSON(运行时.env, 安全TG绑定键(tgUserId), {
+					uuid: row.uuid, tgUserId, tgUsername: attr.tgUsername || null,
+					account: row.label || null, boundAt: Date.now(),
+				});
+				await 安全KV写入JSON(运行时.env, 安全TG用户键(row.uuid), {
+					uuid: row.uuid, tgUserId, tgUsername: attr.tgUsername || null, boundAt: Date.now(),
+				});
+				repaired++;
+			} catch(e) { console.error('[修复TG绑定] 失败 uuid=' + row.uuid + ':', e.message); conflicts++; }
+		}
+		const remaining = allRows.filter(r => {
+			let attr = {}; try { attr = JSON.parse(r.attributes || '{}'); } catch(e) {}
+			return attr.tgUserId || r.source === 'register-panel-tg-verified';
+		}).length;
+		return 安全JSON响应({
+			success: true, dryRun,
+			scanned, repaired, conflicts, anomalies, skipped,
+			remaining: Math.max(0, remaining - scanned),
+			hasMore: (remaining - scanned) > 0,
+			conflictList: conflictList.slice(0, 10),
+			anomalyList: anomalyList.slice(0, 10),
+			note: 'repaired=重建缺失的tg_bind；conflicts=tg_bind指向其他用户(需人工)；anomalies=tg-verified但无tgUserId(需人工)；skipped=已一致',
+		});
+	}
+
 	if (pathname === '/admin/system/users/migrate-passwords' && request.method === 'POST') {
 		const payload = await request.json().catch(() => ({}));
 		const dryRun = !!payload.dryRun;
@@ -12011,7 +12145,14 @@ function 生成安全管理后台注入代码() {
           detail('状态', '<span class="admin-plus-badge' + selectedStatus.className + '">' + escapeHtml(selectedStatus.label) + '</span>') +
           detail('账号状态', '<span class="admin-plus-badge' + ((selectedUser.subscription && selectedUser.subscription.status === 'banned') ? ' warn' : '') + '">' + escapeHtml(selectedUser.subscription && selectedUser.subscription.status === 'banned' ? '已封禁' : '正常') + '</span>') +
           detail('来源', escapeHtml(selectedUser.profile && selectedUser.profile.source || '-')) +
-          detail('TG 用户 ID', '<code>' + escapeHtml(selectedUser.profile && selectedUser.profile.tgUserId || '未绑定') + '</code>') +
+          detail('TG 用户 ID', '<code>' + escapeHtml((function(){
+            var tgId = selectedUser.profile && selectedUser.profile.tgUserId;
+            var src = selectedUser.profile && selectedUser.profile.source;
+            if (tgId) return tgId;
+            if (src === 'register-panel-tg-verified') return '⚠️ 绑定数据异常（需修复）';
+            if (src === 'register-panel' || src === 'admin') return '未通过TG验证';
+            return '未绑定';
+          })()) + '</code>') +
           detail('TG 用户名', escapeHtml(selectedUser.profile && (selectedUser.profile.tgUsername || selectedUser.profile.tgFirstName) || '未绑定')) +
           detail('创建时间', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.createdAt))) +
           detail('更新时间', escapeHtml(fmtTime(selectedUser.lifecycle && selectedUser.lifecycle.updatedAt))) +
@@ -12697,6 +12838,8 @@ export const __adminPlus = {
 	安全列出KV记录,
 	安全获取用户,
 	安全根据注册信息获取用户,
+	安全按TG用户ID获取用户,
+	安全解析TG绑定,
 	安全确保用户存在,
 	安全创建用户,
 	安全是否允许节点UUID,
