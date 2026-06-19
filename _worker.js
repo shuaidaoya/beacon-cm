@@ -876,7 +876,9 @@ export default {
 						return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 					}
 					const 纯文本 = msg.text.split(/@\w+/)[0];
-					if (!纯文本.startsWith('/')) {
+					const 首词 = 纯文本.trim().split(/\s+/)[0] || '';
+					// 放行英文命令（/开头）或中文命令词消息，其余静默丢弃
+					if (!纯文本.startsWith('/') && !中文TG命令词.includes(首词)) {
 						return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 					}
 					// 管理命令(bc前缀)的权限校验统一在「安全处理TG命令」函数内的「安全判定TG管理员」守卫完成
@@ -903,12 +905,12 @@ export default {
 						info.chatId = TG.ChatID || 'none';
 						if (TG.BotToken) {
 							const userCommands = [
-								{ command: 'bnhelp', description: '显示帮助菜单' },
-								{ command: 'bnbind', description: '绑定TG账号（验证码）' },
-								{ command: 'bnwhoami', description: '查看我的TG ID和绑定状态' },
-								{ command: 'bncheckin', description: '每日签到领 2~10GB 流量' },
-								{ command: 'bntraffic', description: '查询剩余流量' },
-								{ command: 'bnstatus', description: '查询账户状态' },
+								{ command: 'bnhelp', description: '显示帮助菜单（也可发「帮助」）' },
+								{ command: 'bnbind', description: '绑定TG账号（验证码，也可发「绑定 验证码」）' },
+								{ command: 'bnwhoami', description: '查看我的TG ID和绑定状态（也可发「我是谁」）' },
+								{ command: 'bncheckin', description: '每日签到领 2~10GB 流量（也可发「签到」）' },
+								{ command: 'bntraffic', description: '查询剩余流量（也可发「流量」）' },
+								{ command: 'bnstatus', description: '查询账户状态（也可发「状态」）' },
 							];
 							const adminCommands = [
 								{ command: 'bcbanned', description: '列出被封禁用户' },
@@ -4442,6 +4444,9 @@ async function 安全判定TG管理员(env, 运行时, tgFrom, chatId) {
 	}
 }
 
+// 普通用户中文命令触发词：发送这些词即可触发对应命令（须与「安全处理TG命令」内的中文匹配保持一致）
+const 中文TG命令词 = ['签到', '帮助', '流量', '状态', '我是谁', '绑定'];
+
 async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom = null) {
 	if (!消息文本) return '';
 	const 纯文本 = 消息文本.split(/@\w+/)[0];
@@ -4449,6 +4454,8 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 	const cmd = parts[0].toLowerCase().replace(/2$/, '');
 	const arg = parts[1] || '';
 	const 匹配命令 = (name) => cmd === '/' + name || cmd === '/' + name + '2' || cmd === '/' + name + '@' + (tgFrom?.username || '');
+	// 中文命令词匹配：parts[0] 即首词（「绑定 <验证码>」的 arg 复用现有 parts[1] 解析）
+	const 匹配中文 = (词) => parts[0] === 词;
 
 	const 提取账号 = (u) => {
 		if (!u) return '-';
@@ -4470,8 +4477,8 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 		if (!判定.ok) return 判定.message;
 	}
 
-	// /bnbind <code> — TG验证码验证入口（不用/start避免唤醒其他机器人）
-	if ((匹配命令('bnbind') || (cmd === '/start' && arg)) && arg && arg.length >= 4 && arg.length <= 8 && tgFrom && tgFrom.id) {
+	// /bnbind <code> — TG验证码验证入口（不用/start避免唤醒其他机器人）；中文「绑定 <验证码>」同样可用
+	if ((匹配命令('bnbind') || (cmd === '/start' && arg) || 匹配中文('绑定')) && arg && arg.length >= 4 && arg.length <= 8 && tgFrom && tgFrom.id) {
 		try {
 			const tgUserId = tgFrom.id;
 			const tgUsername = tgFrom.username ? '@' + tgFrom.username : null;
@@ -4532,7 +4539,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 	}
 
 	// ── 查看自己的TG ID ──
-	if (匹配命令('bnwhoami')) {
+	if (匹配命令('bnwhoami') || 匹配中文('我是谁')) {
 		if (!tgFrom?.id) return '⚠️ 无法识别用户身份。';
 		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgFrom.id), null)
 			|| await 安全KV读取JSON(运行时.env, 安全TG绑定键(String(tgFrom.id)), null)
@@ -4545,14 +4552,15 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 			(bindRecord?.uuid ? '' : '💡 请先通过注册页面获取验证码，在群内发送 <code>/bnbind 验证码</code> 完成绑定。');
 	}
 
-	if (匹配命令('bnhelp') || 匹配命令('bchelp') || cmd === '/start') {
+	if (匹配命令('bnhelp') || 匹配命令('bchelp') || cmd === '/start' || 匹配中文('帮助')) {
 		return '<b>🔐 Beacon 灯塔 Bot 命令</b>\n\n' +
-			'<b>/bnhelp</b> — 显示此帮助\n' +
-			'<b>/bnbind</b> <code>&lt;验证码&gt;</code> — 绑定TG账号\n' +
-			'<b>/bnwhoami</b> — 查看我的TG信息\n' +
-			'<b>/bncheckin</b> — 每日签到\n' +
-			'<b>/bntraffic</b> — 查询剩余流量\n' +
-			'<b>/bnstatus</b> — 查询账户状态\n\n' +
+			'<b>💬 普通命令（直接发送中文即可）</b>\n' +
+			'<b>签到</b> — 每日签到领流量 <code>/bncheckin</code>\n' +
+			'<b>帮助</b> — 显示此帮助 <code>/bnhelp</code>\n' +
+			'<b>流量</b> — 查询剩余流量 <code>/bntraffic</code>\n' +
+			'<b>状态</b> — 查询账户状态 <code>/bnstatus</code>\n' +
+			'<b>我是谁</b> — 查看我的TG信息 <code>/bnwhoami</code>\n' +
+			'<b>绑定 &lt;验证码&gt;</b> — 绑定TG账号 <code>/bnbind &lt;验证码&gt;</code>\n\n' +
 			'<b>🔰 管理命令（仅管理员）</b>\n' +
 			'<b>/bcbanned</b> — 列出所有被封禁用户\n' +
 			'<b>/bcbaninfo</b> <code>&lt;用户名&gt;</code> — 查封禁详情\n' +
@@ -4561,11 +4569,11 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 			'<b>/bcpurge</b> <code>&lt;UUID&gt;</code> — 清理D1脏数据\n' +
 			'<b>/bcpurgeall</b> — ⚠️ 清空所有用户\n' +
 			'<b>/bcsync</b> — 同步群成员并封禁退群用户\n\n' +
-			'提示：群内有多个机器人时，用 <code>@机器人用户名</code> 指定目标。';
+			'💡 提示：普通命令直接发中文即可，也可用英文命令；群内有多个机器人时，用 <code>@机器人用户名</code> 指定目标。';
 	}
 
 	// ── TG 签到命令 ──
-		if (匹配命令('bncheckin')) {
+		if (匹配命令('bncheckin') || 匹配中文('签到')) {
 			if (!tgFrom || !tgFrom.id) return '⚠️ 无法识别用户身份。';
 			const tgUserId = tgFrom.id;
 			const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgUserId), null);
@@ -4595,7 +4603,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 		}
 
 	// ── TG 查询流量命令 ──
-	if (匹配命令('bntraffic')) {
+	if (匹配命令('bntraffic') || 匹配中文('流量')) {
 		if (!tgFrom || !tgFrom.id) return '⚠️ 无法识别用户身份。';
 		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgFrom.id), null);
 		if (!bindRecord || !bindRecord.uuid) return '⚠️ 您尚未绑定账号。';
@@ -4617,7 +4625,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 	}
 
 	// ── TG 账户状态命令 ──
-	if (匹配命令('bnstatus')) {
+	if (匹配命令('bnstatus') || 匹配中文('状态')) {
 		if (!tgFrom || !tgFrom.id) return '⚠️ 无法识别用户身份。';
 		const bindRecord = await 安全KV读取JSON(运行时.env, 安全TG绑定键(tgFrom.id), null);
 		if (!bindRecord || !bindRecord.uuid) return '⚠️ 您尚未绑定账号，请先在注册页面完成TG验证。';
@@ -4831,7 +4839,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 		return await 安全同步TG群成员(运行时, env);
 	}
 
-	return /^\//.test(cmd) ? '<b>❓ 未知命令</b>\n\n输入 <b>/bnhelp</b> 查看可用命令列表。' : '';
+	return /^\//.test(cmd) ? '<b>❓ 未知命令</b>\n\n发送 <b>帮助</b> 或输入 <b>/bnhelp</b> 查看可用命令列表。' : '';
 }
 
 function 掩码敏感信息(文本, 前缀长度 = 3, 后缀长度 = 2) {
@@ -12568,7 +12576,7 @@ function 生成安全管理后台注入代码() {
         const resp = await fetch('https://api.telegram.org/bot' + botToken + '/setWebhook?url=' + encodeURIComponent(webhookUrl) + '&allowed_updates=' + encodeURIComponent(JSON.stringify(['message','edited_message','chat_member'])));
         const result = await resp.json();
         const cmds = { commands: [
-          { command: 'bchelp', description: '显示帮助' },
+          { command: 'bnhelp', description: '显示帮助菜单（也可发「帮助」）' },
           { command: 'bcbanned', description: '列出被封用户' },
           { command: 'bcbaninfo', description: '查封禁详情' },
           { command: 'bcunban', description: '解封用户' },
