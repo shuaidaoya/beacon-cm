@@ -9276,7 +9276,7 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 	// ── KV 残留用户清理：以 D1 为真相源，KV 有 sys:user:<uuid> 但 D1 没有 = 残留 ──
 	// 当年 bcpurgeall 对 D1 执行 DELETE FROM users（全表清空成功），但 KV 循环逐条 delete 受限流/
 	// 超时中断 → 930 条 KV 记录残留（全有值）。安全统计键数量 D1 卡顿回退 KV.list 数 key → "一千多"。
-	// 分批清理（每批 limit 个，默认80，上限100）避免超 Workers 单请求 1000 子请求上限。
+	// 分批清理（每批 limit 个，默认5，上限100）规避 Cloudflare Workers 6连接限制。
 	// dryRun 仅扫描统计不删除，秒回；正式清理返回 hasMore，需重复调用直至 hasMore:false。
 	if (pathname === '/admin/system/purge-ghosts') {
 		if (!DB实例) return 安全JSON响应({ success: false, error: 'D1 未就绪' }, 503);
@@ -9310,10 +9310,14 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 		// 4. 正式：串行清理前 batchLimit 个（Cloudflare Workers 限制6个同时连接，并发会排队丢弃）
 		const batch = staleKeys.slice(0, batchLimit);
 		let kvStalePurged = 0, failed = 0;
+		const debug = [];
 		for (const key of batch) {
 			const staleUuid = key.slice(安全用户前缀.length).toLowerCase();
+			const dbg = { uuid: staleUuid.slice(0, 8), stage: 'start' };
+			debug.push(dbg);
 			try {
 				// 串行读原始记录（绕过墓碑，残留用户有墓碑会挡住 安全获取用户）
+				dbg.stage = 'read';
 				let rec = {};
 				try {
 					const raw = await 运行时.env.KV.get(key);
@@ -9323,34 +9327,48 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 				const label = typeof rec.label === 'string' ? rec.label : '';
 				const tgUserId = rec.attributes?.tgUserId || rec.tgUserId || null;
 				// 主记录优先删除（计数残留的核心）——删除成功即计入已清理
+				dbg.stage = 'delete-main';
 				await 安全KV删除键(运行时.env, 安全用户前缀 + staleUuid);
 				kvStalePurged++;
+				dbg.stage = 'main-done';
 				// 派生键：失败不影响计数（主键已删，后续批次可补清，幂等）
 				try {
+					dbg.stage = 'deriv-tomb';
 					await 安全KV删除键(运行时.env, 'sys:deleted:' + staleUuid); // 清当年 bcpurgeall 写的墓碑
+					dbg.stage = 'deriv-index';
 					if (userKey) await 安全KV删除键(运行时.env, 安全用户索引键(userKey));
+					dbg.stage = 'deriv-v2';
 					if (label) {
 						const v2Key = 安全生成注册用户键V2(label);
 						if (v2Key) await 安全KV写入JSON(运行时.env, 安全用户索引键(v2Key), { deleted: true, uuid: staleUuid, deletedAt: nowMs });
 					}
+					dbg.stage = 'deriv-trojan';
 					await 安全KV删除键(运行时.env, 安全用户木马索引键(sha224(staleUuid)));
+					dbg.stage = 'deriv-sub';
 					await 安全KV删除键(运行时.env, 安全订阅状态键(staleUuid));
+					dbg.stage = 'deriv-ban';
 					await 安全KV删除键(运行时.env, 安全活跃封禁键('uuid', staleUuid));
+					dbg.stage = 'deriv-tguser';
 					await 安全KV删除键(运行时.env, 安全TG用户键(staleUuid));
+					dbg.stage = 'deriv-tgbind';
 					if (tgUserId) {
 						await 安全KV删除键(运行时.env, 安全TG绑定键(String(tgUserId)));
 						await 安全KV删除键(运行时.env, 安全TG绑定键(Number(tgUserId)));
 					}
+					dbg.stage = 'deriv-online';
 					await DO在线离开(运行时.env, staleUuid);
 					失效用户缓存(staleUuid);
-				} catch(e2) { console.error('[清KV残留] 派生键失败 uuid=' + staleUuid + ':', e2.message); }
-			} catch(e) { console.error('[清KV残留] 主键失败 uuid=' + staleUuid + ':', e.message); failed++; }
+					dbg.stage = 'done';
+				} catch(e2) { dbg.stage = 'deriv-fail:' + e2.message; console.error('[清KV残留] 派生键失败 uuid=' + staleUuid + ':', e2.message); }
+			} catch(e) { dbg.stage = 'main-fail:' + e.message; console.error('[清KV残留] 主键失败 uuid=' + staleUuid + ':', e.message); failed++; }
 		}
 		const remaining = Math.max(0, staleKeys.length - kvStalePurged);
 		return 安全JSON响应({
 			success: true, dryRun: false,
 			kvStaleScanned, kvStaleReal, kvStalePurged, failed,
 			remaining, hasMore: remaining > 0,
+			batchSize: batch.length,
+			debug,
 			kvListNote: 'KV list 索引最终一致，清理后需等待数小时复查；hasMore=true 时重复调用直至 false',
 		});
 	}
