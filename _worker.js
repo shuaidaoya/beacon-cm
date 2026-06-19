@@ -9493,15 +9493,18 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 		try {
 			const TG_TXT = await env.KV.get('tg.json');
 			const TG_JSON = TG_TXT ? JSON.parse(TG_TXT) : { BotToken: null, ChatID: null };
+			const rawAdminIds = TG_JSON.AdminIDs;
+			const adminIds = Array.isArray(rawAdminIds) ? rawAdminIds.map(String) : (rawAdminIds != null && rawAdminIds !== '' ? [String(rawAdminIds)] : []);
 			return 安全JSON响应({
 				botToken: TG_JSON.BotToken || '',
 				chatId: TG_JSON.ChatID || '',
 				panelId: TG_JSON.PanelID || 'A',
+				adminIds,
 				securityNotifyEnabled: 当前配置.tgSecurityNotifications?.enabled || false,
 				syncEnabled: 当前配置.tgSecurityNotifications?.syncEnabled || false,
 			});
 		} catch (e) {
-			return 安全JSON响应({ botToken: '', chatId: '', panelId: 'A', securityNotifyEnabled: false });
+			return 安全JSON响应({ botToken: '', chatId: '', panelId: 'A', adminIds: [], securityNotifyEnabled: false });
 		}
 	}
 
@@ -9513,6 +9516,12 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 			if (body.BotToken !== undefined) tgData.BotToken = body.BotToken || null;
 			if (body.ChatID !== undefined) tgData.ChatID = body.ChatID ? String(body.ChatID) : null;
 			if (body.PanelID !== undefined) tgData.PanelID = String(body.PanelID) || 'A';
+			// 管理员 TG ID 白名单：接受数组或逗号分隔字符串，规范化为字符串数组
+			if (body.adminIds !== undefined) {
+				const raw = body.adminIds;
+				let arr = Array.isArray(raw) ? raw : (typeof raw === 'string' ? raw.split(/[,，\s]+/) : []);
+				tgData.AdminIDs = arr.map((s) => String(s).trim()).filter(Boolean);
+			}
 			await env.KV.put('tg.json', JSON.stringify(tgData, null, 2));
 			let notifyEnabled = 当前配置.tgSecurityNotifications?.enabled || false;
 			let syncEnabled = 当前配置.tgSecurityNotifications?.syncEnabled || false;
