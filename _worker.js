@@ -9437,6 +9437,47 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 	// ?key= 鉴权 + ?dryRun= 预览 + ?limit= 分批（默认5，串行规避6连接限制）
 	if (pathname === '/admin/system/repair-tg-bindings') {
 		if (!DB实例) return 安全JSON响应({ success: false, error: 'D1 未就绪' }, 503);
+		// 诊断模式：?detail=<uuid> 返回单用户在 D1/KV 的真实数据（排查后台显示不一致）
+		const detailUuid = url.searchParams.get('detail');
+		if (detailUuid) {
+			const nUuid = String(detailUuid).toLowerCase();
+			const result = { uuid: nUuid };
+			// D1 原始行
+			try {
+				const d1Row = await DB实例.prepare('SELECT uuid, label, source, attributes FROM users WHERE uuid=?').bind(nUuid).first();
+				result.d1 = d1Row ? {
+					uuid: d1Row.uuid, label: d1Row.label, source: d1Row.source,
+					attributesRaw: d1Row.attributes,
+					attributesParsed: (() => { try { return JSON.parse(d1Row.attributes || '{}'); } catch(e) { return { _parseError: e.message }; } })(),
+				} : null;
+			} catch(e) { result.d1Error = e.message; }
+			// KV user 记录（经安全获取用户，走 内存→D1→DO→KV 路径）
+			try {
+				const user = await 安全获取用户(运行时, nUuid);
+				result.kvUser = user ? {
+					uuid: user.uuid, label: user.label, source: user.source,
+					topTgUserId: user.tgUserId || null,
+					attributesTgUserId: user.attributes?.tgUserId || null,
+					attributesTgUsername: user.attributes?.tgUsername || null,
+					hasAttributes: !!user.attributes,
+					attributeKeys: user.attributes ? Object.keys(user.attributes) : [],
+				} : null;
+			} catch(e) { result.kvUserError = e.message; }
+			// KV 原始 sys:user:<uuid>
+			try {
+				const kvRaw = await 运行时.env.KV.get('sys:user:' + nUuid);
+				result.kvRawExists = !!kvRaw;
+				if (kvRaw) {
+					const parsed = JSON.parse(kvRaw);
+					result.kvRaw = { topTgUserId: parsed.tgUserId || null, attrTgUserId: parsed.attributes?.tgUserId || null, source: parsed.source };
+				}
+			} catch(e) { result.kvRawError = e.message; }
+			// 经后台展示提取函数的结果
+			if (result.kvUser) {
+				result.display = 安全提取用户展示信息(result.kvUser);
+			}
+			return 安全JSON响应({ success: true, detail: result });
+		}
 		const dryRun = String(url.searchParams.get('dryRun') || '').toLowerCase() === 'true' || url.searchParams.get('dryRun') === '1';
 		const rawLimit = url.searchParams.get('limit');
 		const batchLimit = rawLimit == null ? 5 : Math.min(Math.max(安全数值(rawLimit, 5, 1, 100), 1), 100);
