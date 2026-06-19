@@ -1930,8 +1930,11 @@ if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
  				} else if (访问路径 === 'admin' || 访问路径.startsWith('admin/')) {//验证cookie后响应管理页面
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
+					// purge-ghosts 支持 ?key=管理员密码 备用鉴权（供脚本调用，绕过 cookie+UA 绑定）
+					const purgeGhostsKey = (访问路径 === 'admin/system/purge-ghosts') ? url.searchParams.get('key') : null;
+					const purgeGhostsAuthed = purgeGhostsKey && 管理员密码 && purgeGhostsKey === 管理员密码;
 					// 没有cookie或cookie错误，跳转到/login页面
-					if (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码)) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
+					if (!purgeGhostsAuthed && (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码))) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
 					if (访问路径 === 'admin/system' || 访问路径.startsWith('admin/system/')) {
 						return await 处理安全管理接口({ request, env, ctx, url, 访问IP, UA });
 					} else if (访问路径 === 'admin/log.json') {// 读取日志内容
