@@ -9878,6 +9878,22 @@ button[disabled]{opacity:.6;cursor:not-allowed}
 .footer{text-align:center;margin-top:24px;padding:16px 0;color:#475569;font-size:12px;line-height:1.6}
 .footer a{color:#64748b;text-decoration:none}
 .footer a:hover{color:#94a3b8}
+.sub-copy-mask{position:fixed;inset:0;background:rgba(2,8,23,.72);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;opacity:0;transition:opacity .2s ease;pointer-events:none}
+.sub-copy-mask.show{opacity:1;pointer-events:auto}
+.sub-copy-dialog{width:100%;max-width:440px;background:linear-gradient(160deg,#0f172a,#0b1220);border:1px solid rgba(99,102,241,.28);border-radius:20px;box-shadow:0 24px 60px rgba(2,8,23,.6);padding:26px 24px;transform:translateY(12px) scale(.98);transition:transform .22s ease}
+.sub-copy-mask.show .sub-copy-dialog{transform:translateY(0) scale(1)}
+.sub-copy-icon{width:48px;height:48px;border-radius:14px;background:linear-gradient(135deg,rgba(59,130,246,.18),rgba(139,92,246,.16));border:1px solid rgba(99,102,241,.32);display:flex;align-items:center;justify-content:center;font-size:24px;margin-bottom:14px}
+.sub-copy-title{font-size:18px;font-weight:800;color:#f1f5f9;margin-bottom:10px}
+.sub-copy-body{font-size:13.5px;line-height:1.7;color:#cbd5e1}
+.sub-copy-body p{margin:0 0 10px}
+.sub-copy-code{display:flex;align-items:center;gap:8px;margin:10px 0;padding:10px 12px;background:#020817;border:1px dashed rgba(99,102,241,.4);border-radius:10px;color:#93c5fd;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;word-break:break-all}
+.sub-copy-code .tag{flex-shrink:0;padding:2px 8px;border-radius:6px;background:rgba(59,130,246,.16);color:#bfdbfe;font-size:11px;font-weight:700}
+.sub-copy-note{font-size:12px;color:#94a3b8;line-height:1.6;margin:10px 0 0}
+.sub-copy-actions{display:flex;gap:10px;margin-top:18px}
+.sub-copy-actions .copy-btn{flex:1;justify-content:center;display:inline-flex;align-items:center}
+.sub-copy-confirm{background:linear-gradient(135deg,#2563eb,#7c3aed);color:#fff;border:none}
+.sub-copy-confirm[disabled]{opacity:.55;cursor:not-allowed;filter:saturate(.6)}
+.sub-copy-confirm .count{display:inline-block;min-width:18px;text-align:center}
 </style>
 </head>
 <body>
@@ -10197,15 +10213,92 @@ const AuthForm = {
   },
 };
 AuthForm.init();
+const LATENCY_TEST_URL = 'http://www.gstatic.com/generate_204';
+const LATENCY_READ_SECONDS = 5;
+function copyTextToClipboard(value) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(value);
+  }
+  const ta = document.createElement('textarea');
+  ta.value = value;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } finally { document.body.removeChild(ta); }
+  return Promise.resolve();
+}
+function closeSubCopyMask() {
+  const mask = document.getElementById('sub-copy-mask');
+  if (!mask) return;
+  mask.classList.remove('show');
+  if (mask._countTimer) { clearInterval(mask._countTimer); mask._countTimer = null; }
+  setTimeout(() => { if (mask.parentNode) mask.parentNode.removeChild(mask); }, 220);
+}
+function openSubCopyMask(value, originButton) {
+  let mask = document.getElementById('sub-copy-mask');
+  if (mask) mask.remove();
+  mask = document.createElement('div');
+  mask.id = 'sub-copy-mask';
+  mask.className = 'sub-copy-mask';
+  mask.innerHTML = '' +
+    '<div class="sub-copy-dialog" role="dialog" aria-modal="true" aria-labelledby="sub-copy-title">' +
+      '<div class="sub-copy-icon">⚡</div>' +
+      '<div class="sub-copy-title" id="sub-copy-title">复制前请先修改测延迟链接</div>' +
+      '<div class="sub-copy-body">' +
+        '<p>本订阅部署在 Cloudflare 上，而 CF Workers 默认<strong style="color:#fbbf24">不允许访问自身所托管的网络</strong>。多数代理软件默认用 CF 链接测延迟，会导致测延迟全部显示为超时（红），但实际并不影响代理使用。</p>' +
+        '<p>请在代理软件的<strong style="color:#93c5fd">测延迟 URL / 健康检查地址</strong>处改为下方链接：</p>' +
+        '<div class="sub-copy-code"><span class="tag">测延迟</span>' + LATENCY_TEST_URL + '</div>' +
+        '<p class="sub-copy-note">修改完成后再复制订阅地址导入。请阅读 <strong style="color:#f8fafc">' + LATENCY_READ_SECONDS + '</strong> 秒后方可继续复制。</p>' +
+      '</div>' +
+      '<div class="sub-copy-actions">' +
+        '<button type="button" class="copy-btn" id="sub-copy-cancel">稍后再说</button>' +
+        '<button type="button" class="copy-btn sub-copy-confirm" id="sub-copy-confirm" disabled><span class="count">' + LATENCY_READ_SECONDS + '</span> 秒后可复制</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(mask);
+  requestAnimationFrame(() => mask.classList.add('show'));
+
+  const confirmBtn = mask.querySelector('#sub-copy-confirm');
+  const cancelBtn = mask.querySelector('#sub-copy-cancel');
+  let remaining = LATENCY_READ_SECONDS;
+  mask._countTimer = setInterval(() => {
+    remaining -= 1;
+    if (remaining > 0) {
+      confirmBtn.innerHTML = '<span class="count">' + remaining + '</span> 秒后可复制';
+    } else {
+      clearInterval(mask._countTimer);
+      mask._countTimer = null;
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = '我已知晓，复制订阅地址';
+    }
+  }, 1000);
+
+  cancelBtn.onclick = closeSubCopyMask;
+  mask.onclick = (event) => { if (event.target === mask) closeSubCopyMask(); };
+  confirmBtn.onclick = async () => {
+    if (confirmBtn.disabled) return;
+    try {
+      await copyTextToClipboard(value);
+      originButton.textContent = '已复制';
+      setTimeout(() => { originButton.textContent = '复制订阅地址'; }, 1500);
+    } catch {}
+    closeSubCopyMask();
+  };
+}
 document.querySelectorAll('[data-copy]').forEach((button) => {
   button.addEventListener('click', async () => {
     const target = document.getElementById(button.getAttribute('data-copy'));
     const value = target?.textContent || '';
     if (!value) return;
+    if (button.getAttribute('data-copy') === 'result-sub') {
+      openSubCopyMask(value, button);
+      return;
+    }
     try {
-      await navigator.clipboard.writeText(value);
+      await copyTextToClipboard(value);
       button.textContent = '已复制';
-      setTimeout(() => { button.textContent = button.getAttribute('data-copy') === 'result-uuid' ? '复制 UUID' : '复制订阅地址'; }, 1200);
+      setTimeout(() => { button.textContent = '复制 UUID'; }, 1200);
     } catch {}
   });
 });
