@@ -9312,17 +9312,13 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 				kvListNote: 'KV list 索引最终一致，清理后需等待数小时复查',
 			});
 		}
-		// 4. 正式：串行清理前 batchLimit 个（Cloudflare Workers 限制6个同时连接，并发会排队丢弃）
+		// 4. 正式：串行清理前 batchLimit 个（Cloudflare Workers 限制6个同时连接，串行更可靠）
 		const batch = staleKeys.slice(0, batchLimit);
 		let kvStalePurged = 0, failed = 0;
-		const debug = [];
 		for (const key of batch) {
 			const staleUuid = key.slice(安全用户前缀.length).toLowerCase();
-			const dbg = { uuid: staleUuid.slice(0, 8), stage: 'start' };
-			debug.push(dbg);
 			try {
 				// 串行读原始记录（绕过墓碑，残留用户有墓碑会挡住 安全获取用户）
-				dbg.stage = 'read';
 				let rec = {};
 				try {
 					const raw = await 运行时.env.KV.get(key);
@@ -9332,51 +9328,34 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 				const label = typeof rec.label === 'string' ? rec.label : '';
 				const tgUserId = rec.attributes?.tgUserId || rec.tgUserId || null;
 				// 主记录优先删除（计数残留的核心）——删除成功即计入已清理
-				dbg.stage = 'delete-main';
 				await 安全KV删除键(运行时.env, 安全用户前缀 + staleUuid);
 				kvStalePurged++;
-				dbg.stage = 'main-done';
 				// 派生键：失败不影响计数（主键已删，后续批次可补清，幂等）
 				try {
-					dbg.stage = 'deriv-tomb';
 					await 安全KV删除键(运行时.env, 'sys:deleted:' + staleUuid); // 清当年 bcpurgeall 写的墓碑
-					dbg.stage = 'deriv-index';
 					if (userKey) await 安全KV删除键(运行时.env, 安全用户索引键(userKey));
-					dbg.stage = 'deriv-v2';
 					if (label) {
 						const v2Key = 安全生成注册用户键V2(label);
 						if (v2Key) await 安全KV写入JSON(运行时.env, 安全用户索引键(v2Key), { deleted: true, uuid: staleUuid, deletedAt: nowMs });
 					}
-					dbg.stage = 'deriv-trojan';
 					await 安全KV删除键(运行时.env, 安全用户木马索引键(sha224(staleUuid)));
-					dbg.stage = 'deriv-sub';
 					await 安全KV删除键(运行时.env, 安全订阅状态键(staleUuid));
-					dbg.stage = 'deriv-ban';
 					await 安全KV删除键(运行时.env, 安全活跃封禁键('uuid', staleUuid));
-					dbg.stage = 'deriv-tguser';
 					await 安全KV删除键(运行时.env, 安全TG用户键(staleUuid));
-					dbg.stage = 'deriv-tgbind';
 					if (tgUserId) {
 						await 安全KV删除键(运行时.env, 安全TG绑定键(String(tgUserId)));
 						await 安全KV删除键(运行时.env, 安全TG绑定键(Number(tgUserId)));
 					}
-					dbg.stage = 'deriv-online';
 					await DO在线离开(运行时.env, staleUuid);
 					失效用户缓存(staleUuid);
-					dbg.stage = 'done';
-				} catch(e2) { dbg.stage = 'deriv-fail:' + e2.message; console.error('[清KV残留] 派生键失败 uuid=' + staleUuid + ':', e2.message); }
-			} catch(e) { dbg.stage = 'main-fail:' + e.message; console.error('[清KV残留] 主键失败 uuid=' + staleUuid + ':', e.message); failed++; }
+				} catch(e2) { console.error('[清KV残留] 派生键失败 uuid=' + staleUuid + ':', e2.message); }
+			} catch(e) { console.error('[清KV残留] 主键失败 uuid=' + staleUuid + ':', e.message); failed++; }
 		}
 		const remaining = Math.max(0, staleKeys.length - kvStalePurged);
 		return 安全JSON响应({
 			success: true, dryRun: false,
 			kvStaleScanned, kvStaleReal, kvStalePurged, failed,
 			remaining, hasMore: remaining > 0,
-			batchSize: batch.length,
-			staleKeysLength: staleKeys.length,
-			kvListPages,
-			batchLimit,
-			debug,
 			kvListNote: 'KV list 索引最终一致，清理后需等待数小时复查；hasMore=true 时重复调用直至 false',
 		});
 	}
