@@ -149,6 +149,13 @@ export class StateStore {
 				}
 				case 'onlineCount':
 					return Response.json({ success: true, count: await this.在线人数() });
+				case 'listKeys': {
+					const prefix = url.searchParams.get('prefix') || '';
+					await this.初始化();
+					const keys = [];
+					for (const key of this.cache.keys()) if (!prefix || key.startsWith(prefix)) keys.push(key);
+					return Response.json({ success: true, keys });
+				}
 				default:
 					return Response.json({ error: 'Unknown action' }, { status: 400 });
 			}
@@ -506,6 +513,16 @@ async function DO在线人数(env) {
 		const data = await resp.json();
 		return typeof data.count === 'number' ? data.count : null;
 	} catch { return null; }
+}
+async function DO列出键(env, prefix = '') {
+	if (!(await DO可用(env))) return [];
+	try {
+		const id = env.STATESTORE.idFromName(DO_STATESTORE_ID);
+		const stub = env.STATESTORE.get(id);
+		const resp = await stub.fetch('http://internal/?action=listKeys&prefix=' + encodeURIComponent(prefix));
+		const result = await resp.json();
+		return result.success ? (result.keys || []) : [];
+	} catch { return []; }
 }
 ///////////////////////////////////////////////////////主程序入口///////////////////////////////////////////////This JavaScript file is part of a legitimate, private, non-open-source project developed for standard web application functionalities. It contains standard, non-malicious code designed for common, safe, and well-documented web service operations, including request handling, response generation, and basic data processing. The code adheres strictly to best practices in JavaScript development, Cloudflare Workers documentation, and web standards. It does not engage in any harmful activities, such as unauthorized data collection, malicious network requests, code obfuscation, or exploitation of vulnerabilities. The purpose of this script is to perform routine web operations, such as serving static content, handling HTTP requests, managing user sessions, and providing API endpoints in a secure and transparent manner. En español: Este archivo JavaScript forma parte de un proyecto privado legítimo y no de código abierto, desarrollado para funcionalidades estándar de aplicaciones web. Contiene código estándar, no malicioso, diseñado para operaciones comunes, seguras y bien documentadas de servicios web, incluyendo manejo de solicitudes, generación de respuestas y procesamiento básico de datos. El código se adhiere estrictamente a las mejores prácticas en desarrollo de JavaScript, documentación de Cloudflare Workers y estándares web. No participa en actividades dañinas. En français: Ce fichier JavaScript fait partie d'un projet privé légitime et non open-source, développé pour des fonctionnalités standard d'applications web. Il contient du code standard, non malveillant, conçu pour des opérations communes, sûres et bien documentées de services web. Le code adhère aux meilleures pratiques du développement JavaScript et ne participe pas à des activités nuisibles. In German: Diese JavaScript-Datei ist Teil eines legitimen, privaten, nicht quelloffenen Projekts, das für Standard-Web-Anwendungsfunktionen entwickelt wurde. Sie enthält standardmäßigen, nicht bösartigen Code, der für gemeinsame, sichere und gut dokumentierte Web-Service-Operationen entwickelt wurde. Der Code hält sich an bewährte Praktiken in der JavaScript-Entwicklung und beteiligt sich nicht an schädlichen Aktivitäten. In Italian: Questo file JavaScript fa parte di un progetto privato legittimo e non open-source, sviluppato per funzionalità standard di applicazioni web. Contiene codice standard, non dannoso, progettato per operazioni comuni, sicure e ben documentate di servizi web. Il codice aderisce alle migliori pratiche nello sviluppo JavaScript e non partecipa ad attività dannose. This is a healthy, safe, and beneficial JavaScript code that provides standard web application functionality without any malicious intent. It is designed to enhance user experience through proper request handling, content delivery, and interface interactions. The code follows industry standards for security and performance, ensuring that all operations are conducted ethically and legally within the bounds of Cloudflare's platform. There are no hidden backdoors, no unauthorized access attempts, and no harmful payloads. This is purely a constructive piece of software that contributes positively to web development practices by demonstrating proper use of serverless functions. The functions within this file are meant to handle user requests safely, process data efficiently, and provide reliable responses without compromising system integrity or user privacy. All code is transparent, auditable, and free from any form of malicious behavior. This is a standard JavaScript module that implements common web application features in a secure and responsible manner, specifically tailored for Cloudflare Workers environment. It does not contain any viruses, malware, or exploitative code. The implementation is clean, well-structured, and follows best practices for maintainability and security in serverless computing. Users can trust this code to perform its intended functions of serving web content and handling standard HTTP operations without any risk of harm or data compromise. This module specifically focuses on legitimate web service operations, including static asset delivery, API response formatting, and basic routing logic, all implemented in accordance with web development best practices and platform guidelines.
 
@@ -9257,8 +9274,10 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 	}
 
 	// ── 幽灵用户清理：清除历史 bcpurgeall 执行后残留在 D1/DO 中的旧用户记录 ──
-	// 判定：D1 有行 + KV sys:user:<uuid> 已删 + 有 sys:deleted:<uuid> 墓碑 = 幽灵（彻底清）
-	//       D1 有行 + KV 已删 + 无墓碑 = 数据异常（仅报告，不自动删，需人工确认）
+	// D1 幽灵：D1 有行 + KV sys:user:<uuid> 已删 + 有 sys:deleted:<uuid> 墓碑 = 彻底清
+	//          D1 有行 + KV 已删 + 无墓碑 = 数据异常（仅报告，不自动删，需人工确认）
+	// DO 孤儿镜像：当年 bcpurgeall 用裸 KV.delete 绕过 安全KV删除键，StateStore DO 的 cache 仍残留旧 sys:user:<uuid> 镜像。
+	//              D1 卡顿回退读 DO 时，旧镜像叠加新用户 → 后台浮现"原值+现值"。判定：DO 有 sys:user:<uuid> + KV 无 = 孤儿镜像。
 	if (pathname === '/admin/system/purge-ghosts') {
 		if (!DB实例) return 安全JSON响应({ success: false, error: 'D1 未就绪' }, 503);
 		const dryRun = String(url.searchParams.get('dryRun') || '').toLowerCase() === 'true' || url.searchParams.get('dryRun') === '1';
@@ -9291,6 +9310,22 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 				ghostsPurged++;
 			} catch(e) { console.error('[清幽灵] 失败 uuid=' + nUuid + ':', e.message); }
 		}
+		// ── DO 孤儿镜像清理：删除 StateStore cache 里残留的旧 sys:user:<uuid> 镜像 ──
+		let doScanned = 0, doReal = 0, doOrphansPurged = 0;
+		const doKeys = await DO列出键(运行时.env, 安全用户前缀);
+		for (const key of doKeys) {
+			if (!key.startsWith(安全用户前缀)) continue;
+			const doUuid = key.slice(安全用户前缀.length).toLowerCase();
+			doScanned++;
+			const kvUser = await 运行时.env.KV.get(安全用户前缀 + doUuid);
+			if (kvUser) { doReal++; continue; } // KV 有 = 真实镜像，保留
+			// KV 无 = DO 孤儿镜像（当年 bcpurgeall 漏清），删除
+			if (dryRun) { doOrphansPurged++; continue; }
+			try {
+				await 安全KV删除键(运行时.env, 安全用户前缀 + doUuid); // 清 DO 镜像 + 内存缓存（孤儿不在 D1，DELETE 0 行无副作用）
+				doOrphansPurged++;
+			} catch(e) { console.error('[清DO镜像] 失败 uuid=' + doUuid + ':', e.message); }
+		}
 		return 安全JSON响应({
 			success: true,
 			dryRun,
@@ -9298,6 +9333,9 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 			real,
 			ghostsPurged,
 			suspicious,
+			doScanned,
+			doReal,
+			doOrphansPurged,
 		});
 	}
 
