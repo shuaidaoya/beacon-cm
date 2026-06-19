@@ -9281,7 +9281,7 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 	if (pathname === '/admin/system/purge-ghosts') {
 		if (!DB实例) return 安全JSON响应({ success: false, error: 'D1 未就绪' }, 503);
 		const dryRun = String(url.searchParams.get('dryRun') || '').toLowerCase() === 'true' || url.searchParams.get('dryRun') === '1';
-		const batchLimit = Math.min(Math.max(安全数值(url.searchParams.get('limit'), 80, 1, 100), 1), 100);
+		const batchLimit = Math.min(Math.max(安全数值(url.searchParams.get('limit'), 30, 1, 100), 1), 100);
 		// 1. D1 真实 uuid 集合（1 子请求）
 		const rows = await DB实例.prepare('SELECT uuid FROM users').all();
 		const d1UuidSet = new Set((rows?.results || []).map(r => String(r.uuid || '').toLowerCase()).filter(Boolean));
@@ -9309,53 +9309,55 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 		}
 		// 4. 正式：取前 batchLimit 个并发清理
 		const batch = staleKeys.slice(0, batchLimit);
-		// 4a. 并发读记录（每批20并发）
+		// 4a. 并发读记录（每批10并发）
 		const records = {};
-		for (let i = 0; i < batch.length; i += 20) {
-			await Promise.all(batch.slice(i, i + 20).map(async (key) => {
+		for (let i = 0; i < batch.length; i += 10) {
+			await Promise.all(batch.slice(i, i + 10).map(async (key) => {
 				try {
 					const raw = await 运行时.env.KV.get(key);
 					if (raw) records[key] = JSON.parse(raw);
 				} catch(e) { console.error('[清KV残留] 读记录失败 key=' + key + ':', e.message); }
 			}));
 		}
-		// 4b. 并发清理主键+派生键（每批20并发，每用户~9操作）
-		let kvStalePurged = 0;
-		for (let i = 0; i < batch.length; i += 20) {
-			await Promise.all(batch.slice(i, i + 20).map(async (key) => {
+		// 4b. 并发清理主键+派生键（每批10并发，每用户~17操作）
+		let kvStalePurged = 0, failed = 0;
+		for (let i = 0; i < batch.length; i += 10) {
+			await Promise.all(batch.slice(i, i + 10).map(async (key) => {
 				const staleUuid = key.slice(安全用户前缀.length).toLowerCase();
 				try {
 					const rec = records[key] || {};
 					const userKey = typeof rec.userKey === 'string' ? rec.userKey : '';
 					const label = typeof rec.label === 'string' ? rec.label : '';
 					const tgUserId = rec.attributes?.tgUserId || rec.tgUserId || null;
-					// 主记录（同步清 DO 镜像 + 内存缓存；残留不在 D1，DELETE 0 行无副作用）
+					// 主记录优先删除（计数残留的核心）——删除成功即计入已清理
 					await 安全KV删除键(运行时.env, 安全用户前缀 + staleUuid);
-					await 安全KV删除键(运行时.env, 'sys:deleted:' + staleUuid); // 清当年 bcpurgeall 写的墓碑
-					// 派生键（与 安全删除用户账号 一致）
-					if (userKey) await 安全KV删除键(运行时.env, 安全用户索引键(userKey));
-					if (label) {
-						const v2Key = 安全生成注册用户键V2(label);
-						if (v2Key) await 安全KV写入JSON(运行时.env, 安全用户索引键(v2Key), { deleted: true, uuid: staleUuid, deletedAt: nowMs });
-					}
-					await 安全KV删除键(运行时.env, 安全用户木马索引键(sha224(staleUuid)));
-					await 安全KV删除键(运行时.env, 安全订阅状态键(staleUuid));
-					await 安全KV删除键(运行时.env, 安全活跃封禁键('uuid', staleUuid));
-					await 安全KV删除键(运行时.env, 安全TG用户键(staleUuid));
-					if (tgUserId) {
-						await 安全KV删除键(运行时.env, 安全TG绑定键(String(tgUserId)));
-						await 安全KV删除键(运行时.env, 安全TG绑定键(Number(tgUserId)));
-					}
-					await DO在线离开(运行时.env, staleUuid);
-					失效用户缓存(staleUuid);
 					kvStalePurged++;
-				} catch(e) { console.error('[清KV残留] 失败 uuid=' + staleUuid + ':', e.message); }
+					// 派生键：失败不影响计数（主键已删，后续批次可补清，幂等）
+					try {
+						await 安全KV删除键(运行时.env, 'sys:deleted:' + staleUuid); // 清当年 bcpurgeall 写的墓碑
+						if (userKey) await 安全KV删除键(运行时.env, 安全用户索引键(userKey));
+						if (label) {
+							const v2Key = 安全生成注册用户键V2(label);
+							if (v2Key) await 安全KV写入JSON(运行时.env, 安全用户索引键(v2Key), { deleted: true, uuid: staleUuid, deletedAt: nowMs });
+						}
+						await 安全KV删除键(运行时.env, 安全用户木马索引键(sha224(staleUuid)));
+						await 安全KV删除键(运行时.env, 安全订阅状态键(staleUuid));
+						await 安全KV删除键(运行时.env, 安全活跃封禁键('uuid', staleUuid));
+						await 安全KV删除键(运行时.env, 安全TG用户键(staleUuid));
+						if (tgUserId) {
+							await 安全KV删除键(运行时.env, 安全TG绑定键(String(tgUserId)));
+							await 安全KV删除键(运行时.env, 安全TG绑定键(Number(tgUserId)));
+						}
+						await DO在线离开(运行时.env, staleUuid);
+						失效用户缓存(staleUuid);
+					} catch(e2) { console.error('[清KV残留] 派生键失败 uuid=' + staleUuid + ':', e2.message); }
+				} catch(e) { console.error('[清KV残留] 主键失败 uuid=' + staleUuid + ':', e.message); failed++; }
 			}));
 		}
 		const remaining = Math.max(0, staleKeys.length - kvStalePurged);
 		return 安全JSON响应({
 			success: true, dryRun: false,
-			kvStaleScanned, kvStaleReal, kvStalePurged,
+			kvStaleScanned, kvStaleReal, kvStalePurged, failed,
 			remaining, hasMore: remaining > 0,
 			kvListNote: 'KV list 索引最终一致，清理后需等待数小时复查；hasMore=true 时重复调用直至 false',
 		});
