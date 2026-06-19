@@ -9281,7 +9281,8 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 	if (pathname === '/admin/system/purge-ghosts') {
 		if (!DB实例) return 安全JSON响应({ success: false, error: 'D1 未就绪' }, 503);
 		const dryRun = String(url.searchParams.get('dryRun') || '').toLowerCase() === 'true' || url.searchParams.get('dryRun') === '1';
-		const batchLimit = Math.min(Math.max(安全数值(url.searchParams.get('limit'), 5, 1, 100), 1), 100);
+		const rawLimit = url.searchParams.get('limit');
+		const batchLimit = rawLimit == null ? 5 : Math.min(Math.max(安全数值(rawLimit, 5, 1, 100), 1), 100);
 		// 1. D1 真实 uuid 集合（1 子请求）
 		const rows = await DB实例.prepare('SELECT uuid FROM users').all();
 		const d1UuidSet = new Set((rows?.results || []).map(r => String(r.uuid || '').toLowerCase()).filter(Boolean));
