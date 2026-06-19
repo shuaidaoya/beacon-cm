@@ -785,34 +785,6 @@ export default {
 		if (env.GO2SOCKS5) SOCKS5白名单 = await 整理成数组(env.GO2SOCKS5);
 
 		// TG webhook – MUST be at top, before any other processing
-		// 🔥 手动触发清空所有用户（浏览器访问，绕过TG Bot）
-	if (访问路径 === '/purge-all' || 访问路径 === '/purge-all/') {
-		try {
-			const key = url.searchParams.get('key');
-			if (!key || key !== 管理员密码) return new Response('未授权', { status: 403 });
-			const 运行时 = await 创建安全运行时(env);
-			const allUsers = await 安全列出KV记录(运行时.env, 'sys:user:', 5000) || [];
-			for (const u of allUsers) {
-				if (!u?.uuid) continue;
-				try {
-					const nUuid = u.uuid.toLowerCase();
-					await 运行时.env.KV.delete(安全用户前缀 + nUuid);
-					await 运行时.env.KV.put('sys:deleted:' + nUuid, JSON.stringify({ deletedAt: Date.now() }));
-					if (u.userKey) await 运行时.env.KV.delete(安全用户索引键(u.userKey));
-					const tgId = u.attributes?.tgUserId || u.tgUserId;
-					if (tgId) { await 运行时.env.KV.delete(安全TG绑定键(String(tgId))); await 运行时.env.KV.delete(安全TG绑定键(Number(tgId))); await 运行时.env.KV.delete(安全TG用户键(nUuid)); }
-				} catch(e) {}
-			}
-			if (DB实例) {
-				try { await DB实例.prepare('DELETE FROM users').run(); } catch(e) {}
-				try { await DB实例.prepare('DELETE FROM online_heartbeat').run(); } catch(e) {}
-				try { await DB实例.prepare('DELETE FROM global_traffic').run(); } catch(e) {}
-				try { await DB实例.prepare('DELETE FROM daily_traffic').run(); } catch(e) {}
-			}
-			return new Response('清空完成：' + allUsers.length + ' 个用户', { status: 200 });
-		} catch(e) { return new Response('失败: ' + e.message, { status: 500 }); }
-	}
-
 	if (访问路径 === 'tg-webhook' || 访问路径 === 'tg-webhook/' || 访问路径.startsWith('tg-webhook?')) {
 			if (request.method === 'POST') {
 				let replyToChatId = null, replyToken = null;
@@ -4471,7 +4443,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 	const 掩码UUID = (uuid) => 安全掩码UUID(uuid);
 
 	// ── 管理命令统一权限守卫（白名单为主 + API 回退 fail-closed）──
-	const 安全管理命令 = ['bcpurgeall', 'bcpurge', 'bcunbind', 'bcbanned', 'bcbaninfo', 'bcunban', 'bcsync'];
+	const 安全管理命令 = ['bcpurge', 'bcunbind', 'bcbanned', 'bcbaninfo', 'bcunban', 'bcsync'];
 	if (安全管理命令.some((name) => 匹配命令(name))) {
 		const 判定 = await 安全判定TG管理员(env, 运行时, tgFrom, chatId);
 		if (!判定.ok) return 判定.message;
@@ -4567,7 +4539,6 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 			'<b>/bcunban</b> <code>&lt;用户名&gt;</code> — 解封用户\n' +
 			'<b>/bcunbind</b> <code>&lt;TGID&gt;</code> — 手动解绑TG\n' +
 			'<b>/bcpurge</b> <code>&lt;UUID&gt;</code> — 清理D1脏数据\n' +
-			'<b>/bcpurgeall</b> — ⚠️ 清空所有用户\n' +
 			'<b>/bcsync</b> — 同步群成员并封禁退群用户\n\n' +
 			'💡 提示：普通命令直接发中文即可，也可用英文命令；群内有多个机器人时，用 <code>@机器人用户名</code> 指定目标。';
 	}
@@ -4647,39 +4618,6 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 			'<b>TG用户名：</b>' + (bindRecord.tgUsername || '未设置') + '\n' +
 			'<b>流量：</b>' + fmt(usedBytes) + ' / ' + fmt(totalBytes) + '\n' +
 			'<b>签到：</b>' + (checkedInToday ? '✅ 今日已签到' : '⬜ 今日未签到') + ' | 连续' + (tgRecord.checkInStreak || 0) + '天 | 累计' + (tgRecord.totalCheckIns || 0) + '次';
-	}
-
-	// ── 清空所有用户（管理员慎用）──
-	if (匹配命令('bcpurgeall')) {
-		if (!运行时 || !运行时.env) return '系统暂不可用';
-		const allUsers = await 安全列出KV记录(运行时.env, 'sys:user:', 5000);
-		if (!allUsers || allUsers.length === 0) return '✅ 当前没有用户。';
-		const count = allUsers.length;
-		let ok = 0, fail = 0;
-		for (const u of allUsers) {
-			if (!u?.uuid) continue;
-			try {
-				const nUuid = u.uuid.toLowerCase();
-				await 运行时.env.KV.delete(安全用户前缀 + nUuid);
-				await 运行时.env.KV.put('sys:deleted:' + nUuid, JSON.stringify({ deletedAt: Date.now() }));
-				if (u.userKey) await 运行时.env.KV.delete(安全用户索引键(u.userKey));
-				const tgId = u.attributes?.tgUserId || u.tgUserId;
-				if (tgId) {
-					await 运行时.env.KV.delete(安全TG绑定键(String(tgId)));
-					await 运行时.env.KV.delete(安全TG绑定键(Number(tgId)));
-					await 运行时.env.KV.delete(安全TG用户键(nUuid));
-				}
-				ok++;
-			} catch(e) { fail++; }
-		}
-		// D1清空（异步，不阻塞返回）
-		if (DB实例) {
-			try { await DB实例.prepare('DELETE FROM users').run(); } catch(e) { console.error('[清空] D1删除失败:', e.message); }
-			try { await DB实例.prepare('DELETE FROM online_heartbeat').run(); } catch(e) {} 
-			try { await DB实例.prepare('DELETE FROM global_traffic').run(); } catch(e) {}
-			try { await DB实例.prepare('DELETE FROM daily_traffic').run(); } catch(e) {}
-		}
-		return '✅ 已清空 ' + ok + '/' + count + ' 个用户 (KV+D1)。\n💡 新用户注册默认流量已设为 100GB。';
 	}
 
 	// ── 设置墓碑标记阻止登录（D1过载时替代清理）──
@@ -9316,6 +9254,51 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 			source: 'admin-api',
 		}, nowMs);
 		return 安全JSON响应({ success: true, ...result });
+	}
+
+	// ── 幽灵用户清理：清除历史 bcpurgeall 执行后残留在 D1/DO 中的旧用户记录 ──
+	// 判定：D1 有行 + KV sys:user:<uuid> 已删 + 有 sys:deleted:<uuid> 墓碑 = 幽灵（彻底清）
+	//       D1 有行 + KV 已删 + 无墓碑 = 数据异常（仅报告，不自动删，需人工确认）
+	if (pathname === '/admin/system/purge-ghosts') {
+		if (!DB实例) return 安全JSON响应({ success: false, error: 'D1 未就绪' }, 503);
+		const dryRun = String(url.searchParams.get('dryRun') || '').toLowerCase() === 'true' || url.searchParams.get('dryRun') === '1';
+		// 一次性读出 D1 所有 uuid，避免长事务
+		const rows = await DB实例.prepare('SELECT uuid FROM users').all();
+		const allUuids = (rows?.results || []).map(r => String(r.uuid || '').toLowerCase()).filter(Boolean);
+		let real = 0, ghostsPurged = 0;
+		const suspicious = [];
+		for (const nUuid of allUuids) {
+			if (!安全UUID有效(nUuid)) continue;
+			const kvUser = await 运行时.env.KV.get(安全用户前缀 + nUuid);
+			if (kvUser) { real++; continue; } // KV 有记录 = 真实用户，跳过
+			// KV 已删，查墓碑判定是否幽灵
+			const tombstone = await 运行时.env.KV.get('sys:deleted:' + nUuid);
+			if (!tombstone) { suspicious.push(nUuid); continue; } // 无墓碑 = 数据异常，不自动删
+			if (dryRun) { ghostsPurged++; continue; }
+			// 幽灵：直接清 D1 行 + KV/DO 派生键（不经过 安全获取用户，因为它读墓碑会返回 null）
+			try {
+				if (DB实例) { try { await DB实例.prepare('DELETE FROM users WHERE uuid=?').bind(nUuid).run(); } catch(e) {} }
+				if (DB实例) { try { await DB实例.prepare('DELETE FROM online_heartbeat WHERE uuid=?').bind(nUuid).run(); } catch(e) {} }
+				await 安全KV删除键(运行时.env, 安全用户前缀 + nUuid);      // 清 DO 镜像 + 内存缓存
+				await 安全KV删除键(运行时.env, 'sys:deleted:' + nUuid);    // 清墓碑本身
+				// 派生索引/状态键（无法反查 userKey/tgId，按已知派生键清理）
+				await 安全KV删除键(运行时.env, 安全用户木马索引键(sha224(nUuid)));
+				await 安全KV删除键(运行时.env, 安全订阅状态键(nUuid));
+				await 安全KV删除键(运行时.env, 安全活跃封禁键('uuid', nUuid));
+				await 安全KV删除键(运行时.env, 安全TG用户键(nUuid));
+				await DO在线离开(运行时.env, nUuid);                      // 清 StateStore online_users 幽灵计数
+				失效用户缓存(nUuid);
+				ghostsPurged++;
+			} catch(e) { console.error('[清幽灵] 失败 uuid=' + nUuid + ':', e.message); }
+		}
+		return 安全JSON响应({
+			success: true,
+			dryRun,
+			scanned: allUuids.length,
+			real,
+			ghostsPurged,
+			suspicious,
+		});
 	}
 
 	if (pathname === '/admin/system/users/migrate-passwords' && request.method === 'POST') {
