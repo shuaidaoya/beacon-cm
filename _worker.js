@@ -9273,87 +9273,62 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 		return 安全JSON响应({ success: true, ...result });
 	}
 
-	// ── 幽灵用户清理：清除历史 bcpurgeall 执行后残留在 D1/DO 中的旧用户记录 ──
-	// D1 幽灵：D1 有行 + KV sys:user:<uuid> 已删 + 有 sys:deleted:<uuid> 墓碑 = 彻底清
-	//          D1 有行 + KV 已删 + 无墓碑 = 数据异常（仅报告，不自动删，需人工确认）
-	// DO 孤儿镜像：当年 bcpurgeall 用裸 KV.delete 绕过 安全KV删除键，StateStore DO 的 cache 仍残留旧 sys:user:<uuid> 镜像。
-	//              D1 卡顿回退读 DO 时，旧镜像叠加新用户 → 后台浮现"原值+现值"。判定：DO 有 sys:user:<uuid> + KV 无 = 孤儿镜像。
+	// ── KV 残留用户清理：以 D1 为真相源，KV 有 sys:user:<uuid> 但 D1 没有 = 残留 ──
+	// 当年 bcpurgeall 对 D1 执行 DELETE FROM users（全表清空成功），但 KV 循环逐条 delete 受限流/
+	// 超时中断 → 930 条 KV 记录残留（全有值）。安全统计键数量 D1 卡顿回退 KV.list 数 key → "一千多"。
+	// 分批清理（每批 limit 个，默认80，上限100）避免超 Workers 单请求 1000 子请求上限。
+	// dryRun 仅扫描统计不删除，秒回；正式清理返回 hasMore，需重复调用直至 hasMore:false。
 	if (pathname === '/admin/system/purge-ghosts') {
 		if (!DB实例) return 安全JSON响应({ success: false, error: 'D1 未就绪' }, 503);
 		const dryRun = String(url.searchParams.get('dryRun') || '').toLowerCase() === 'true' || url.searchParams.get('dryRun') === '1';
-		// 一次性读出 D1 所有 uuid，避免长事务
+		const batchLimit = Math.min(Math.max(安全数值(url.searchParams.get('limit'), 80, 1, 100), 1), 100);
+		// 1. D1 真实 uuid 集合（1 子请求）
 		const rows = await DB实例.prepare('SELECT uuid FROM users').all();
-		const allUuids = (rows?.results || []).map(r => String(r.uuid || '').toLowerCase()).filter(Boolean);
-		let real = 0, ghostsPurged = 0;
-		const suspicious = [];
-		for (const nUuid of allUuids) {
-			if (!安全UUID有效(nUuid)) continue;
-			const kvUser = await 运行时.env.KV.get(安全用户前缀 + nUuid);
-			if (kvUser) { real++; continue; } // KV 有记录 = 真实用户，跳过
-			// KV 已删，查墓碑判定是否幽灵
-			const tombstone = await 运行时.env.KV.get('sys:deleted:' + nUuid);
-			if (!tombstone) { suspicious.push(nUuid); continue; } // 无墓碑 = 数据异常，不自动删
-			if (dryRun) { ghostsPurged++; continue; }
-			// 幽灵：直接清 D1 行 + KV/DO 派生键（不经过 安全获取用户，因为它读墓碑会返回 null）
-			try {
-				if (DB实例) { try { await DB实例.prepare('DELETE FROM users WHERE uuid=?').bind(nUuid).run(); } catch(e) {} }
-				if (DB实例) { try { await DB实例.prepare('DELETE FROM online_heartbeat WHERE uuid=?').bind(nUuid).run(); } catch(e) {} }
-				await 安全KV删除键(运行时.env, 安全用户前缀 + nUuid);      // 清 DO 镜像 + 内存缓存
-				await 安全KV删除键(运行时.env, 'sys:deleted:' + nUuid);    // 清墓碑本身
-				// 派生索引/状态键（无法反查 userKey/tgId，按已知派生键清理）
-				await 安全KV删除键(运行时.env, 安全用户木马索引键(sha224(nUuid)));
-				await 安全KV删除键(运行时.env, 安全订阅状态键(nUuid));
-				await 安全KV删除键(运行时.env, 安全活跃封禁键('uuid', nUuid));
-				await 安全KV删除键(运行时.env, 安全TG用户键(nUuid));
-				await DO在线离开(运行时.env, nUuid);                      // 清 StateStore online_users 幽灵计数
-				失效用户缓存(nUuid);
-				ghostsPurged++;
-			} catch(e) { console.error('[清幽灵] 失败 uuid=' + nUuid + ':', e.message); }
-		}
-		// ── DO 孤儿镜像清理：删除 StateStore cache 里残留的旧 sys:user:<uuid> 镜像 ──
-		let doScanned = 0, doReal = 0, doOrphansPurged = 0;
-		const doKeys = await DO列出键(运行时.env, 安全用户前缀);
-		for (const key of doKeys) {
-			if (!key.startsWith(安全用户前缀)) continue;
-			const doUuid = key.slice(安全用户前缀.length).toLowerCase();
-			doScanned++;
-			const kvUser = await 运行时.env.KV.get(安全用户前缀 + doUuid);
-			if (kvUser) { doReal++; continue; } // KV 有 = 真实镜像，保留
-			// KV 无 = DO 孤儿镜像（当年 bcpurgeall 漏清），删除
-			if (dryRun) { doOrphansPurged++; continue; }
-			try {
-				await 安全KV删除键(运行时.env, 安全用户前缀 + doUuid); // 清 DO 镜像 + 内存缓存（孤儿不在 D1，DELETE 0 行无副作用）
-				doOrphansPurged++;
-			} catch(e) { console.error('[清DO镜像] 失败 uuid=' + doUuid + ':', e.message); }
-		}
-		// ── KV-D1 不一致清理：以 D1 为真相源，KV 有但 D1 没有的 sys:user:<uuid> = 残留用户 ──
-		// 当年 bcpurgeall 对 D1 执行 DELETE FROM users（全表，清空成功），但 KV 是循环逐条
-		// env.KV.delete，受限流/超时中断 → 930 条 KV 记录残留（全有值）。之后新注册 157 个
-		// 用户 D1+KV 都写 → D1=157、KV=1087。安全统计键数量 D1 卡顿回退 KV.list 数 key → "一千多"。
-		// 判定：KV 有 sys:user:<uuid> 但 uuid 不在 D1 集合 = 残留，彻底清理（主键+派生键）。
-		const d1UuidSet = new Set(allUuids);
-		let kvStaleScanned = 0, kvStaleReal = 0, kvStalePurged = 0;
-		let kvCursor;
+		const d1UuidSet = new Set((rows?.results || []).map(r => String(r.uuid || '').toLowerCase()).filter(Boolean));
+		// 2. KV.list 分页列出所有 sys:user: key，比对出残留（~2 子请求/页）
+		const staleKeys = [];
+		let kvStaleScanned = 0, kvCursor;
 		do {
 			const kvPage = await 运行时.env.KV.list({ prefix: 安全用户前缀, limit: 1000, cursor: kvCursor });
 			for (const k of (kvPage.keys || [])) {
 				kvStaleScanned++;
 				const staleUuid = k.name.slice(安全用户前缀.length).toLowerCase();
-				if (d1UuidSet.has(staleUuid)) { kvStaleReal++; continue; } // D1 有 = 真实用户，保留
-				// D1 没有 = 残留用户，清理
-				if (dryRun) { kvStalePurged++; continue; }
+				if (!d1UuidSet.has(staleUuid)) staleKeys.push(k.name); // D1 没有 = 残留
+			}
+			kvCursor = (!kvPage.list_complete && kvPage.cursor) ? kvPage.cursor : null;
+		} while (kvCursor);
+		const kvStaleReal = kvStaleScanned - staleKeys.length;
+		// 3. dryRun：仅统计，秒回
+		if (dryRun) {
+			return 安全JSON响应({
+				success: true, dryRun: true,
+				kvStaleScanned, kvStaleReal, kvStalePurged: staleKeys.length,
+				remaining: staleKeys.length, hasMore: staleKeys.length > 0,
+				kvListNote: 'KV list 索引最终一致，清理后需等待数小时复查',
+			});
+		}
+		// 4. 正式：取前 batchLimit 个并发清理
+		const batch = staleKeys.slice(0, batchLimit);
+		// 4a. 并发读记录（每批20并发）
+		const records = {};
+		for (let i = 0; i < batch.length; i += 20) {
+			await Promise.all(batch.slice(i, i + 20).map(async (key) => {
 				try {
-					// 直接 KV.get 读原始记录（绕过墓碑/安全获取用户，残留用户有墓碑会返回 null）
-					let userKey = '', label = '', tgUserId = null;
-					try {
-						const raw = await 运行时.env.KV.get(k.name);
-						if (raw) {
-							const rec = JSON.parse(raw);
-							userKey = typeof rec.userKey === 'string' ? rec.userKey : '';
-							label = typeof rec.label === 'string' ? rec.label : '';
-							tgUserId = rec.attributes?.tgUserId || rec.tgUserId || null;
-						}
-					} catch(e) { console.error('[清KV残留] 读记录失败 uuid=' + staleUuid + ':', e.message); }
+					const raw = await 运行时.env.KV.get(key);
+					if (raw) records[key] = JSON.parse(raw);
+				} catch(e) { console.error('[清KV残留] 读记录失败 key=' + key + ':', e.message); }
+			}));
+		}
+		// 4b. 并发清理主键+派生键（每批20并发，每用户~9操作）
+		let kvStalePurged = 0;
+		for (let i = 0; i < batch.length; i += 20) {
+			await Promise.all(batch.slice(i, i + 20).map(async (key) => {
+				const staleUuid = key.slice(安全用户前缀.length).toLowerCase();
+				try {
+					const rec = records[key] || {};
+					const userKey = typeof rec.userKey === 'string' ? rec.userKey : '';
+					const label = typeof rec.label === 'string' ? rec.label : '';
+					const tgUserId = rec.attributes?.tgUserId || rec.tgUserId || null;
 					// 主记录（同步清 DO 镜像 + 内存缓存；残留不在 D1，DELETE 0 行无副作用）
 					await 安全KV删除键(运行时.env, 安全用户前缀 + staleUuid);
 					await 安全KV删除键(运行时.env, 'sys:deleted:' + staleUuid); // 清当年 bcpurgeall 写的墓碑
@@ -9375,24 +9350,14 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 					失效用户缓存(staleUuid);
 					kvStalePurged++;
 				} catch(e) { console.error('[清KV残留] 失败 uuid=' + staleUuid + ':', e.message); }
-			}
-			kvCursor = (!kvPage.list_complete && kvPage.cursor) ? kvPage.cursor : null;
-		} while (kvCursor);
+			}));
+		}
+		const remaining = Math.max(0, staleKeys.length - kvStalePurged);
 		return 安全JSON响应({
-			success: true,
-			dryRun,
-			scanned: allUuids.length,
-			real,
-			ghostsPurged,
-			suspicious,
-			doScanned,
-			doReal,
-			doOrphansPurged,
-			kvStaleScanned,
-			kvStaleReal,
-			kvStalePurged,
-			// 注意：KV list 索引最终一致，删除后 list 不会立即移除该 key，可能需数小时同步
-			kvListNote: 'KV list 索引最终一致，清理后需等待数小时复查',
+			success: true, dryRun: false,
+			kvStaleScanned, kvStaleReal, kvStalePurged,
+			remaining, hasMore: remaining > 0,
+			kvListNote: 'KV list 索引最终一致，清理后需等待数小时复查；hasMore=true 时重复调用直至 false',
 		});
 	}
 
