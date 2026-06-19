@@ -9326,21 +9326,55 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 				doOrphansPurged++;
 			} catch(e) { console.error('[清DO镜像] 失败 uuid=' + doUuid + ':', e.message); }
 		}
-		// ── KV.list 空壳扫描：清除 KV list 索引残留的空壳 sys:user: key ──
-		// 当年 bcpurgeall 裸 KV.delete 后，Cloudflare KV list 索引（最终一致性）仍列出这些 key，
-		// 但 KV.get 返回 null。安全统计键数量 的 KV 回退只数 page.keys.length 不查值 → D1 卡顿时
-		// 计数回退 KV.list 虚高成"一千多"（列表因 KV.get 过滤 null 仍正常）。这是计数虚高的直接根因。
-		let kvListScanned = 0, kvReal = 0, kvShellsPurged = 0;
+		// ── KV-D1 不一致清理：以 D1 为真相源，KV 有但 D1 没有的 sys:user:<uuid> = 残留用户 ──
+		// 当年 bcpurgeall 对 D1 执行 DELETE FROM users（全表，清空成功），但 KV 是循环逐条
+		// env.KV.delete，受限流/超时中断 → 930 条 KV 记录残留（全有值）。之后新注册 157 个
+		// 用户 D1+KV 都写 → D1=157、KV=1087。安全统计键数量 D1 卡顿回退 KV.list 数 key → "一千多"。
+		// 判定：KV 有 sys:user:<uuid> 但 uuid 不在 D1 集合 = 残留，彻底清理（主键+派生键）。
+		const d1UuidSet = new Set(allUuids);
+		let kvStaleScanned = 0, kvStaleReal = 0, kvStalePurged = 0;
 		let kvCursor;
 		do {
 			const kvPage = await 运行时.env.KV.list({ prefix: 安全用户前缀, limit: 1000, cursor: kvCursor });
 			for (const k of (kvPage.keys || [])) {
-				kvListScanned++;
-				const val = await 运行时.env.KV.get(k.name);
-				if (val) { kvReal++; continue; } // KV 有值 = 真实 key，保留
-				// KV.get 返回 null = 空壳 key（list 索引残留），重新删除
-				if (dryRun) { kvShellsPurged++; continue; }
-				try { await 运行时.env.KV.delete(k.name); kvShellsPurged++; } catch(e) { console.error('[清KV空壳] 失败 key=' + k.name + ':', e.message); }
+				kvStaleScanned++;
+				const staleUuid = k.name.slice(安全用户前缀.length).toLowerCase();
+				if (d1UuidSet.has(staleUuid)) { kvStaleReal++; continue; } // D1 有 = 真实用户，保留
+				// D1 没有 = 残留用户，清理
+				if (dryRun) { kvStalePurged++; continue; }
+				try {
+					// 直接 KV.get 读原始记录（绕过墓碑/安全获取用户，残留用户有墓碑会返回 null）
+					let userKey = '', label = '', tgUserId = null;
+					try {
+						const raw = await 运行时.env.KV.get(k.name);
+						if (raw) {
+							const rec = JSON.parse(raw);
+							userKey = typeof rec.userKey === 'string' ? rec.userKey : '';
+							label = typeof rec.label === 'string' ? rec.label : '';
+							tgUserId = rec.attributes?.tgUserId || rec.tgUserId || null;
+						}
+					} catch(e) { console.error('[清KV残留] 读记录失败 uuid=' + staleUuid + ':', e.message); }
+					// 主记录（同步清 DO 镜像 + 内存缓存；残留不在 D1，DELETE 0 行无副作用）
+					await 安全KV删除键(运行时.env, 安全用户前缀 + staleUuid);
+					await 安全KV删除键(运行时.env, 'sys:deleted:' + staleUuid); // 清当年 bcpurgeall 写的墓碑
+					// 派生键（与 安全删除用户账号 一致）
+					if (userKey) await 安全KV删除键(运行时.env, 安全用户索引键(userKey));
+					if (label) {
+						const v2Key = 安全生成注册用户键V2(label);
+						if (v2Key) await 安全KV写入JSON(运行时.env, 安全用户索引键(v2Key), { deleted: true, uuid: staleUuid, deletedAt: nowMs });
+					}
+					await 安全KV删除键(运行时.env, 安全用户木马索引键(sha224(staleUuid)));
+					await 安全KV删除键(运行时.env, 安全订阅状态键(staleUuid));
+					await 安全KV删除键(运行时.env, 安全活跃封禁键('uuid', staleUuid));
+					await 安全KV删除键(运行时.env, 安全TG用户键(staleUuid));
+					if (tgUserId) {
+						await 安全KV删除键(运行时.env, 安全TG绑定键(String(tgUserId)));
+						await 安全KV删除键(运行时.env, 安全TG绑定键(Number(tgUserId)));
+					}
+					await DO在线离开(运行时.env, staleUuid);
+					失效用户缓存(staleUuid);
+					kvStalePurged++;
+				} catch(e) { console.error('[清KV残留] 失败 uuid=' + staleUuid + ':', e.message); }
 			}
 			kvCursor = (!kvPage.list_complete && kvPage.cursor) ? kvPage.cursor : null;
 		} while (kvCursor);
@@ -9354,10 +9388,10 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 			doScanned,
 			doReal,
 			doOrphansPurged,
-			kvListScanned,
-			kvReal,
-			kvShellsPurged,
-			// 注意：KV list 索引是最终一致的，删除后 list 不会立即移除该 key，可能需数小时同步
+			kvStaleScanned,
+			kvStaleReal,
+			kvStalePurged,
+			// 注意：KV list 索引最终一致，删除后 list 不会立即移除该 key，可能需数小时同步
 			kvListNote: 'KV list 索引最终一致，清理后需等待数小时复查',
 		});
 	}
