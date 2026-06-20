@@ -9140,120 +9140,64 @@ async function 处理安全管理接口({ request, env, ctx, url, 访问IP, UA }
 		}, 201);
 	}
 
-	if (pathname === '/admin/system/users' && request.method === 'GET') {
-		const keyword = String(url.searchParams.get('q') || '').trim().toLowerCase();
-		const statusFilter = String(url.searchParams.get('status') || '').trim().toLowerCase();
-		const multiAccountFilter = String(url.searchParams.get('multiAccount') || '').trim().toLowerCase();
-		const multiAccountTypeFilter = String(url.searchParams.get('multiAccountType') || '').trim().toLowerCase();
-		const pageCursor = url.searchParams.get('cursor') || null;
-		const hasFilters = !!(statusFilter || keyword || multiAccountFilter);
-		const pageSize = Math.min(limit, 80);
-		const safeConfig = await 读取安全配置(运行时.env, 运行时);
+		if (pathname === '/admin/system/users' && request.method === 'GET') {
+			const keyword = String(url.searchParams.get('q') || '').trim().toLowerCase();
+			const statusFilter = String(url.searchParams.get('status') || '').trim().toLowerCase();
+			const pageCursor = url.searchParams.get('cursor') || null;
+			const hasFilters = !!(statusFilter || keyword);
+			const pageSize = Math.min(limit, 80);
+			const safeConfig = await 读取安全配置(运行时.env, 运行时);
 
-		let rawUsers, nextCursor, hasMore;
-		if (hasFilters) {
-				rawUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, 5000);
-				nextCursor = null;
-				hasMore = false;
-		} else if (pageCursor) {
-			const page = await 安全分页列出KV(运行时.env, 安全用户前缀, pageSize, pageCursor);
-			rawUsers = page.values;
-			nextCursor = page.cursor;
-			hasMore = !page.listComplete;
-		} else {
-			const page = await 安全分页列出KV(运行时.env, 安全用户前缀, pageSize, null);
-			rawUsers = page.values;
-			nextCursor = page.cursor;
-			hasMore = !page.listComplete;
-		}
-
-		const enrichedUsers = await Promise.all(rawUsers.map(user => 安全构建用户管理信息(运行时, url, user, nowMs, safeConfig)));
-
-		// 多账号识别：按 account / email / lastIp / userKey 分组
-		const multiAccountGroups = {};
-		enrichedUsers.forEach(u => {
-			const keys = [
-				{ key: 'account', value: (u.profile?.account || '').toLowerCase() },
-				{ key: 'email', value: (u.profile?.email || '').toLowerCase() },
-				...(u.ips || (u.lastIp ? [u.lastIp] : [])).map(ip => ({ key: 'lastIp', value: ip.toLowerCase() })),
-				{ key: 'userKey', value: (u.userKey || '').toLowerCase() },
-			];
-			keys.forEach(({ key, value }) => {
-				if (!value) return;
-				if (!multiAccountGroups[key]) multiAccountGroups[key] = {};
-				if (!multiAccountGroups[key][value]) multiAccountGroups[key][value] = [];
-				multiAccountGroups[key][value].push(u.uuid);
-			});
-		});
-		// 标记每个用户的多账号属性
-		enrichedUsers.forEach(u => {
-			const related = [];
-			const keys = [
-				{ key: 'account', value: (u.profile?.account || '').toLowerCase() },
-				{ key: 'email', value: (u.profile?.email || '').toLowerCase() },
-				...(u.ips || (u.lastIp ? [u.lastIp] : [])).map(ip => ({ key: 'lastIp', value: ip.toLowerCase() })),
-				{ key: 'userKey', value: (u.userKey || '').toLowerCase() },
-			];
-			keys.forEach(({ key, value }) => {
-				if (!value) return;
-				const g = multiAccountGroups[key]?.[value] || [];
-				if (g.length > 1) related.push({ type: key, count: g.length, relatedUuids: g.filter(id => id !== u.uuid) });
-			});
-			u.multiAccount = {
-				isMulti: related.length > 0,
-				types: related.map(r => r.type),
-				maxCount: Math.max(0, ...related.map(r => r.count)),
-				groupDetails: related,
-			};
-		});
-
-		const filteredUsers = enrichedUsers.filter((user) => {
-			if (statusFilter && String(user.status || '').toLowerCase() !== statusFilter) return false;
-			if (!keyword) return true;
-			const haystack = [
-				user.uuid,
-				user.label,
-				user.lastIp,
-				user.userKey,
-				user.profile?.account,
-				user.profile?.email,
-				user.profile?.source,
-				user.profile?.tgUserId,
-				user.profile?.tgUsername,
-			].filter(Boolean).join(' ').toLowerCase();
-			return haystack.includes(keyword);
-		}).filter((user) => {
-			if (multiAccountFilter === 'only') {
-				if (!user.multiAccount?.isMulti) return false;
-				if (multiAccountTypeFilter && !(user.multiAccount?.types || []).includes(multiAccountTypeFilter)) return false;
+			let rawUsers, nextCursor, hasMore;
+			if (hasFilters) {
+					rawUsers = await 安全列出KV记录(运行时.env, 安全用户前缀, 5000);
+					nextCursor = null;
+					hasMore = false;
+			} else if (pageCursor) {
+				const page = await 安全分页列出KV(运行时.env, 安全用户前缀, pageSize, pageCursor);
+				rawUsers = page.values;
+				nextCursor = page.cursor;
+				hasMore = !page.listComplete;
+			} else {
+				const page = await 安全分页列出KV(运行时.env, 安全用户前缀, pageSize, null);
+				rawUsers = page.values;
+				nextCursor = page.cursor;
+				hasMore = !page.listComplete;
 			}
-			return true;
-		});
-		const sortedUsers = filteredUsers.sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
-		const userCountResult = hasFilters ? null : await 安全统计键数量(运行时.env, 安全用户前缀, 5000);
-		// 统计各类型的"组数/人数"
-		const multiByType = {};
-		for (const [type, groups] of Object.entries(multiAccountGroups)) {
-			let userCount = 0, groupCount = 0;
-			for (const uuids of Object.values(groups)) {
-				if (uuids.length > 1) { groupCount++; userCount += uuids.length; }
-			}
-			if (groupCount > 0) multiByType[type] = { groups: groupCount, users: userCount };
+
+			const enrichedUsers = await Promise.all(rawUsers.map(user => 安全构建用户管理信息(运行时, url, user, nowMs, safeConfig)));
+
+			const filteredUsers = enrichedUsers.filter((user) => {
+				if (statusFilter && String(user.status || '').toLowerCase() !== statusFilter) return false;
+				if (!keyword) return true;
+				const haystack = [
+					user.uuid,
+					user.label,
+					user.lastIp,
+					user.userKey,
+					user.profile?.account,
+					user.profile?.email,
+					user.profile?.source,
+					user.profile?.tgUserId,
+					user.profile?.tgUsername,
+				].filter(Boolean).join(' ').toLowerCase();
+				return haystack.includes(keyword);
+			});
+			const sortedUsers = filteredUsers.sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
+			const userCountResult = hasFilters ? null : await 安全统计键数量(运行时.env, 安全用户前缀, 5000);
+			return 安全JSON响应({
+				success: true,
+				users: sortedUsers,
+				cursor: nextCursor || null,
+				hasMore: !!hasMore,
+				summary: {
+					total: userCountResult || enrichedUsers.length,
+					filtered: filteredUsers.length,
+					active: hasFilters ? enrichedUsers.filter(item => item.status === 'active').length : null,
+					banned: hasFilters ? enrichedUsers.filter(item => item.status === 'banned').length : null,
+				},
+			});
 		}
-		return 安全JSON响应({
-			success: true,
-			users: sortedUsers,
-			cursor: nextCursor || null,
-			hasMore: !!hasMore,
-			summary: {
-				total: userCountResult || enrichedUsers.length,
-				filtered: filteredUsers.length,
-				active: hasFilters ? enrichedUsers.filter(item => item.status === 'active').length : null,
-				banned: hasFilters ? enrichedUsers.filter(item => item.status === 'banned').length : null,
-				multiByType,
-			},
-		});
-	}
 
 	if (pathname === '/admin/system/subscription-risk' && request.method === 'GET') {
 		const users = await 安全列出KV记录(运行时.env, 安全用户前缀, Math.min(limit * 4, 120));
