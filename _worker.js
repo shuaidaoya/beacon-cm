@@ -4705,7 +4705,7 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 			'<b>账号：</b><code>' + account + '</code>\n' +
 			'<b>状态：</b>' + (banned ? '🚫 已封禁' : '✅ 正常') + '\n' +
 			'<b>TG ID：</b><code>' + tgFrom.id + '</code>\n' +
-			'<b>TG用户名：</b>' + (bindRecord.tgUsername || '未设置') + '\n' +
+			'<b>TG用户名：</b>' + (tgRecord.tgUsername || '未设置') + '\n' +
 			'<b>流量：</b>' + fmt(usedBytes) + ' / ' + fmt(totalBytes) + '\n' +
 			'<b>签到：</b>' + (checkedInToday ? '✅ 今日已签到' : '⬜ 今日未签到') + ' | 连续' + (tgRecord.checkInStreak || 0) + '天 | 累计' + (tgRecord.totalCheckIns || 0) + '次';
 	}
