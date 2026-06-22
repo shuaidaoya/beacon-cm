@@ -1543,6 +1543,8 @@ if (访问路径 === 'register/login' || 访问路径 === 'register/login/') {
 			if (!user) return 认证JSON响应('AUTH_USER_NOT_FOUND', '用户不存在。', null, 404);
 			const profile = 安全提取用户展示信息(user);
 			const tgRecord = profile.tgUserId ? await 安全KV读取JSON(运行时.env, 安全TG绑定键(profile.tgUserId), null) : null;
+			// ponytail: 签到字段源自 user.attributes.dailyCheckin（与签到命令共享），tgRecord 上无这些字段。
+			const checkin = 安全构建签到信息(user);
 			return new Response(JSON.stringify({
 				code: 'TG_PROFILE_SUCCESS',
 				data: {
@@ -1551,9 +1553,9 @@ if (访问路径 === 'register/login' || 访问路径 === 'register/login/') {
 					tgFirstName: profile.tgFirstName || null,
 					tgLastName: profile.tgLastName || null,
 					boundAt: tgRecord?.boundAt || null,
-					checkInStreak: tgRecord?.checkInStreak || 0,
-					lastCheckIn: tgRecord?.lastCheckIn || 0,
-					totalCheckIns: tgRecord?.totalCheckIns || 0,
+					lastCheckIn: checkin.claimedAt || 0,
+					totalCheckIns: checkin.totalClaimDays || 0,
+					claimedToday: checkin.claimedToday,
 				}
 			}), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
 		} catch (e) {
@@ -4698,16 +4700,17 @@ async function 安全处理TG命令(env, 运行时, 消息文本, chatId, tgFrom
 		const totalBytes = user.traffic || 0, usedBytes = user.used_traffic || 0;
 		const fmt = (b) => { if (!b || b <= 0) return '0 B'; const k = 1024, u = ['B','KB','MB','GB','TB']; const i = Math.floor(Math.log(b)/Math.log(k)); return parseFloat((b/Math.pow(k,i)).toFixed(1)) + ' ' + u[i]; };
 		const tgRecord = 解析.bindRecord;
-		const today = new Date(Date.now() + 8*3600*1000).toISOString().slice(0, 10);
-		const lastCheckinDay = tgRecord.lastCheckIn ? new Date(tgRecord.lastCheckIn + 8*3600*1000).toISOString().slice(0, 10) : null;
-		const checkedInToday = lastCheckinDay === today;
+		// ponytail: 签到状态以 user.attributes.dailyCheckin 为唯一事实源（与签到命令/前端共享）。
+		// tgRecord 上不存在 lastCheckIn/checkInStreak/totalCheckIns 字段，旧实现始终读到 0。
+		// 连续天数未被数据模型追踪（仅记录累计 totalClaimDays），故不再展示以免误导。
+		const checkin = 安全构建签到信息(user);
 		return '<b>📋 账户状态</b>\n\n' +
 			'<b>账号：</b><code>' + account + '</code>\n' +
 			'<b>状态：</b>' + (banned ? '🚫 已封禁' : '✅ 正常') + '\n' +
 			'<b>TG ID：</b><code>' + tgFrom.id + '</code>\n' +
 			'<b>TG用户名：</b>' + (tgRecord.tgUsername || '未设置') + '\n' +
 			'<b>流量：</b>' + fmt(usedBytes) + ' / ' + fmt(totalBytes) + '\n' +
-			'<b>签到：</b>' + (checkedInToday ? '✅ 今日已签到' : '⬜ 今日未签到') + ' | 连续' + (tgRecord.checkInStreak || 0) + '天 | 累计' + (tgRecord.totalCheckIns || 0) + '次';
+			'<b>签到：</b>' + (checkin.claimedToday ? '✅ 今日已签到' : '⬜ 今日未签到') + ' | 累计' + (checkin.totalClaimDays || 0) + '次';
 	}
 
 	// ── 设置墓碑标记阻止登录（D1过载时替代清理）──
