@@ -7168,19 +7168,23 @@ async function 安全校验TG验证码(运行时, code) {
 	}
 	// 2. KV 回退
 	const record = await 安全KV读取JSON(运行时.env, key, null);
-	if (record && Date.now() <= 安全数值(record.expiresAt, 0, 0)) {
-		console.log('[TG验证] 来源=KV回退  code=' + code);
-		return { ...record, _src: 'KV' };
-	}
 	if (record && Date.now() > 安全数值(record.expiresAt, 0, 0)) {
 		return { ...record, status: 'expired' };
 	}
-	// 3. D1 兜底（强一致）—— ponytail: KV 跨节点最终一致性延迟 ~36s，DO 运行时未绑定。
-	// verified/duplicate 终态会同步写 D1，此处兜底读取确保 webhook 标记后立即可见，消除跳转延迟。
-	const d1Record = await 安全D1读取验证状态(code);
-	if (d1Record && Date.now() <= 安全数值(d1Record.expiresAt, 0, 0)) {
-		console.log('[TG验证] 来源=D1兜底  code=' + code + ' status=' + d1Record.status);
-		return { ...d1Record, _src: 'D1' };
+	// ponytail: KV 跨节点最终一致性延迟 ~36-54s。verified/duplicate 终态写入节点 A 后，
+	// 节点 B 的 KV 副本仍返回旧 pending，导致前端轮询空等 ~1 分钟。D1 强一致写后立即可读，
+	// 故 KV 返回 pending/任何非终态时，必须查 D1 确认是否已变为 verified/duplicate。
+	// 此前 bug：KV 命中 pending 即直接返回，永远到不了 D1 兜底。
+	if (record && record.status !== 'verified' && record.status !== 'duplicate') {
+		const d1Record = await 安全D1读取验证状态(code);
+		if (d1Record && Date.now() <= 安全数值(d1Record.expiresAt, 0, 0)) {
+			console.log('[TG验证] 来源=D1兜底  code=' + code + ' status=' + d1Record.status + '（KV仍为' + record.status + '）');
+			return { ...d1Record, _src: 'D1' };
+		}
+	}
+	if (record && Date.now() <= 安全数值(record.expiresAt, 0, 0)) {
+		console.log('[TG验证] 来源=KV回退  code=' + code);
+		return { ...record, _src: 'KV' };
 	}
 	return null;
 }
@@ -7190,20 +7194,22 @@ async function 安全校验TG验证码(运行时, code) {
 // ceiling: D1 写入有 ~5-15ms 开销且受 D1 配额限制，故仅存终态（verified/duplicate），
 // pending 态仍走 KV；升级路径为修复 DO 绑定后回退到 DO。
 async function 安全D1写入验证状态(code, record) {
-	if (!DB实例 || !code || !record) return;
+	if (!DB实例 || !code || !record) { console.warn('[TG验证] D1写入跳过: DB实例=' + !!DB实例 + ' code=' + code); return; }
 	try {
 		await DB实例.prepare('CREATE TABLE IF NOT EXISTS tg_verify (code TEXT PRIMARY KEY, status TEXT, data TEXT, expires_at INTEGER, updated_at INTEGER)').run();
 		await DB实例.prepare('INSERT OR REPLACE INTO tg_verify (code, status, data, expires_at, updated_at) VALUES (?, ?, ?, ?, ?)')
 			.bind(code.toUpperCase(), record.status || '', JSON.stringify(record), 安全数值(record.expiresAt, 0, 0), Date.now()).run();
+		console.log('[TG验证] D1写入成功 code=' + code + ' status=' + record.status);
 	} catch(e) { console.warn('[TG验证] D1写入验证状态失败 code=' + code + ': ' + (e?.message || e)); }
 }
 
 async function 安全D1读取验证状态(code) {
-	if (!DB实例 || !code) return null;
+	if (!DB实例 || !code) { console.warn('[TG验证] D1读取: DB实例=' + !!DB实例 + ' code=' + code); return null; }
 	try {
 		const row = await DB实例.prepare('SELECT data FROM tg_verify WHERE code = ?').bind(code.toUpperCase()).first();
+		console.log('[TG验证] D1读取 code=' + code + ' 命中=' + !!row);
 		if (row && row.data) return JSON.parse(row.data);
-	} catch(e) { /* D1 不可用时静默回退 */ }
+	} catch(e) { console.warn('[TG验证] D1读取异常 code=' + code + ': ' + (e?.message || e)); /* D1 不可用时静默回退 */ }
 	return null;
 }
 
