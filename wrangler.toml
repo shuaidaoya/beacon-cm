@@ -20,8 +20,18 @@ database_name = "beacon-tunnel-db"
 database_id = "c17b4997-81f9-458b-bc7d-07369726f5eb"
 
 [[migrations]]
+tag = "v1"
+new_classes = ["TGVerifyDO"]
+
+[[migrations]]
 tag = "v2"
 new_classes = ["StateStore"]
+
+# ponytail: 删除已失效的 TGVerifyDO（运行时未绑定、内存Map不可靠，改用 D1 强一致）。
+# Cloudflare 要求用 delete_classes migration 显式删除已部署的 DO 类，不能直接从代码移除。
+[[migrations]]
+tag = "v3"
+delete_classes = ["TGVerifyDO"]
 
 [triggers]
 crons = ["0 */6 * * *"]
