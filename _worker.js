@@ -7135,14 +7135,15 @@ async function 获取验证DO(env) {
 async function DOMark验证完成(env, code, data) {
 	try {
 		const stub = await 获取验证DO(env);
-		if (!stub) return false;
+		if (!stub) { console.warn('[TG验证诊断] DOMark: DO stub 不可用（env.TG_VERIFY_DO=' + !!env.TG_VERIFY_DO + '）code=' + code); return false; }
 		const resp = await stub.fetch('https://do/mark-verified', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ code, ...data }),
 		});
+		if (!resp.ok) console.warn('[TG验证诊断] DOMark: DO 写入失败 status=' + resp.status + ' code=' + code);
 		return resp.ok;
-	} catch(e) { return false; }
+	} catch(e) { console.warn('[TG验证诊断] DOMark: 异常 ' + (e?.message || e) + ' code=' + code); return false; }
 }
 
 async function DOCheck验证状态(env, code) {
@@ -7210,8 +7211,9 @@ async function 安全标记TG验证完成(运行时, code, tgUserId, tgUsername,
 	record.memberStatus = memberStatus;
 	record.verifiedAt = Date.now();
 	await 安全KV写入JSON(运行时.env, key, record, Math.ceil((record.expiresAt - Date.now()) / 1000));
-	// 通知DO（即时全局可见）
-	DOMark验证完成(运行时.env, code, record).catch(() => {});
+	// 通知DO（即时全局可见）—— ponytail: 必须 await，否则前端轮询可能在 DO 写入完成前就读取而回退到
+	// 最终一致的 KV（跨节点传播 ~60s），这正是“验证后约1分钟才跳转”的根因之一。
+	await DOMark验证完成(运行时.env, code, record);
 	return record;
 }
 
