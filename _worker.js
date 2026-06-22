@@ -1301,8 +1301,24 @@ export default {
 						return 认证JSON响应('AUTH_TG_ACCOUNT_MISMATCH', '验证码对应的账号与请求账号不匹配。', null, 403);
 					}
 					// 再次检查唯一性（防止并发注册）
+					// ponytail: 前端 setInterval 不等 await，TG验证通过瞬间多个轮询请求并发命中本分支。
+					// 第一个请求创建用户后、删除验证码前，后续请求读到 verified 状态再次进入，重复检查
+					// 会发现"用户已存在"并误报 AUTH_SIGNUP_DUPLICATE（前端显示"信息冲突"），随后第一个
+					// 请求的 SUCCESS 到达又显示"注册成功"。此处幂等化：若已存在用户的 account 与本验证码
+					// pending 一致，即为同次验证的并发重复，直接复用该用户返回 SUCCESS，而非报冲突。
+					// 真正被他人占用的场景在 verify-tg POST 阶段已拦截（不会进入本分支创建）。
 					const 用户名已存在 = await 安全根据账号获取用户(运行时, pending.account);
 					if (用户名已存在) {
+						// 同账号 + 同来源 = 本次验证的并发重复请求 → 幂等返回成功
+						if (用户名已存在.label === pending.account && 用户名已存在.source === 'register-panel-tg-verified') {
+							return 认证JSON响应('AUTH_SIGNUP_SUCCESS', 'TG验证通过，注册成功！已切换到登录模式，请直接登录。', {
+								account: pending.account,
+								nextMode: 'signin',
+								user: { uuid: 用户名已存在.uuid },
+								tgBound: true,
+								tgUsername: verifyRecord.tgUsername,
+							}, 200);
+						}
 						return 认证JSON响应('AUTH_SIGNUP_DUPLICATE_USERNAME', '该用户名已被注册（验证期间被占用），请更换其他用户名。', {
 							account: pending.account,
 						}, 409);
@@ -1310,6 +1326,7 @@ export default {
 					if (pending.email) {
 						const 邮箱已存在 = await 安全根据邮箱获取用户(运行时, pending.email);
 						if (邮箱已存在) {
+							// 同账号已在上一步判定；此处邮箱命中且账号不同属真实冲突
 							return 认证JSON响应('AUTH_SIGNUP_DUPLICATE_EMAIL', '该邮箱已绑定其他账户（验证期间被占用），请使用其他邮箱。', {
 								email: pending.email,
 							}, 409);
