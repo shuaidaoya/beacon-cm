@@ -1380,8 +1380,9 @@ export default {
 							tgUsername: verifyRecord.tgUsername,
 							boundAt: Date.now(),
 						});
-						// 三步全部成功 → 清理验证记录
+						// 三步全部成功 → 清理验证记录（KV + D1）
 						try { await 运行时.env.KV.delete(安全TG验证键(code)); } catch(e) {}
+						try { if (DB实例) await DB实例.prepare('DELETE FROM tg_verify WHERE code = ?').bind(code.toUpperCase()).run(); } catch(e) {}
 					} catch(e) {
 						console.error('[注册] TG绑定写入失败 uuid=' + user.uuid + ':', e.message, '（用户已创建但无 tgUserId，验证码保留，前端重试后可补写）');
 						return 认证JSON响应('AUTH_TG_BIND_SAVE_FAILED', 'TG账号验证成功但绑定数据写入失败，请稍后重试。', {
@@ -7174,6 +7175,35 @@ async function 安全校验TG验证码(运行时, code) {
 	if (record && Date.now() > 安全数值(record.expiresAt, 0, 0)) {
 		return { ...record, status: 'expired' };
 	}
+	// 3. D1 兜底（强一致）—— ponytail: KV 跨节点最终一致性延迟 ~36s，DO 运行时未绑定。
+	// verified/duplicate 终态会同步写 D1，此处兜底读取确保 webhook 标记后立即可见，消除跳转延迟。
+	const d1Record = await 安全D1读取验证状态(code);
+	if (d1Record && Date.now() <= 安全数值(d1Record.expiresAt, 0, 0)) {
+		console.log('[TG验证] 来源=D1兜底  code=' + code + ' status=' + d1Record.status);
+		return { ...d1Record, _src: 'D1' };
+	}
+	return null;
+}
+
+// ponytail: D1 强一致验证状态读写。DO 运行时未绑定，KV 跨节点 ~36s 延迟，
+// D1 作为 verified/duplicate 终态的强一致主读源，写后立即可读，消除跳转延迟。
+// ceiling: D1 写入有 ~5-15ms 开销且受 D1 配额限制，故仅存终态（verified/duplicate），
+// pending 态仍走 KV；升级路径为修复 DO 绑定后回退到 DO。
+async function 安全D1写入验证状态(code, record) {
+	if (!DB实例 || !code || !record) return;
+	try {
+		await DB实例.prepare('CREATE TABLE IF NOT EXISTS tg_verify (code TEXT PRIMARY KEY, status TEXT, data TEXT, expires_at INTEGER, updated_at INTEGER)').run();
+		await DB实例.prepare('INSERT OR REPLACE INTO tg_verify (code, status, data, expires_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+			.bind(code.toUpperCase(), record.status || '', JSON.stringify(record), 安全数值(record.expiresAt, 0, 0), Date.now()).run();
+	} catch(e) { console.warn('[TG验证] D1写入验证状态失败 code=' + code + ': ' + (e?.message || e)); }
+}
+
+async function 安全D1读取验证状态(code) {
+	if (!DB实例 || !code) return null;
+	try {
+		const row = await DB实例.prepare('SELECT data FROM tg_verify WHERE code = ?').bind(code.toUpperCase()).first();
+		if (row && row.data) return JSON.parse(row.data);
+	} catch(e) { /* D1 不可用时静默回退 */ }
 	return null;
 }
 
@@ -7200,6 +7230,7 @@ async function 安全标记TG验证完成(运行时, code, tgUserId, tgUsername,
 		} else {
 			record.status = 'duplicate';
 			await 安全KV写入JSON(运行时.env, key, record, Math.ceil((record.expiresAt - Date.now()) / 1000));
+			await 安全D1写入验证状态(code, record);
 			return { ...record, duplicateUuid: existingBind.uuid };
 		}
 	}
@@ -7211,6 +7242,10 @@ async function 安全标记TG验证完成(运行时, code, tgUserId, tgUsername,
 	record.memberStatus = memberStatus;
 	record.verifiedAt = Date.now();
 	await 安全KV写入JSON(运行时.env, key, record, Math.ceil((record.expiresAt - Date.now()) / 1000));
+	// ponytail: D1 强一致写入——DO 运行时未绑定（日志 309 次全 KV回退、0 次 DO），
+	// KV 跨节点最终一致性延迟 ~36s，正是“验证后约1分钟才跳转”根因。D1 写后立即可读，
+	// 作为 verified/duplicate 终态的强一致主读源。pending 态仍走 KV（读多写少，无需 D1）。
+	await 安全D1写入验证状态(code, record);
 	// 通知DO（即时全局可见）—— ponytail: 必须 await，否则前端轮询可能在 DO 写入完成前就读取而回退到
 	// 最终一致的 KV（跨节点传播 ~60s），这正是“验证后约1分钟才跳转”的根因之一。
 	await DOMark验证完成(运行时.env, code, record);
