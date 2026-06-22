@@ -913,9 +913,16 @@ export default {
 						}
 
 						// 在官方群组内处理验证，公开回复
+						// ponytail: 诊断 TG 验证跳转延迟。msg.date 是 Telegram 服务器投递消息的时间戳（秒），
+						// 与 Worker 收到时刻的差值即 webhook 投递延迟（主嫌疑）。升级路径：确认主因后再定方案。
+						const _webhook收到时刻 = Date.now();
+						const _投递延迟ms = msg.date ? (_webhook收到时刻 - msg.date * 1000) : -1;
+						console.log('[TG验证诊断] webhook收到 /bnbind 投递延迟=' + _投递延迟ms + 'ms msg.date=' + msg.date + ' code=' + (验证码匹配[1] || ''));
+						const _webhook处理开始 = Date.now();
 						const 运行时 = await 创建安全运行时(env);
 						const tgFrom = msg.from || null;
 						const replyText = await 安全处理TG命令(env, 运行时, msg.text, String(chatId), tgFrom);
+						console.log('[TG验证诊断] webhook处理耗时=' + (Date.now() - _webhook处理开始) + 'ms（含 getChatMember + 标记 verified）');
 						if (replyText) await 发送TG消息并自动删除(TG.BotToken, chatId, replyText, ctx, msg.message_id);
 						return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 					}
@@ -1291,6 +1298,10 @@ export default {
 					}, 202);
 				}
 				if (verifyRecord.status === 'verified') {
+					// ponytail: 诊断 TG 验证跳转延迟。verifiedAt 是 webhook 标记 verified 的时刻，
+					// 与本请求到达时刻的差值 = verified 状态写入到前端轮询检测到的延迟。
+					const _检测延迟ms = verifyRecord.verifiedAt ? (Date.now() - verifyRecord.verifiedAt) : -1;
+					console.log('[TG验证诊断] verify-tg/check 首次检测到 verified 延迟=' + _检测延迟ms + 'ms code=' + code + ' 来源=' + (verifyRecord._src || 'unknown'));
 					// 验证通过，检查pendingRegistration数据
 					const pending = verifyRecord.pendingRegistration;
 					if (!pending || !pending.account || !pending.passwordHash) {
@@ -7151,13 +7162,13 @@ async function 安全校验TG验证码(运行时, code) {
 	const doResult = await DOCheck验证状态(运行时.env, code);
 	if (doResult && Date.now() <= (doResult.expiresAt || 0)) {
 		console.log('[TG验证] 来源=DO  code=' + code + ' 耗时<1s');
-		return doResult;
+		return { ...doResult, _src: 'DO' };
 	}
 	// 2. KV 回退
 	const record = await 安全KV读取JSON(运行时.env, key, null);
 	if (record && Date.now() <= 安全数值(record.expiresAt, 0, 0)) {
 		console.log('[TG验证] 来源=KV回退  code=' + code);
-		return record;
+		return { ...record, _src: 'KV' };
 	}
 	if (record && Date.now() > 安全数值(record.expiresAt, 0, 0)) {
 		return { ...record, status: 'expired' };
