@@ -19,14 +19,6 @@ binding = "DB"
 database_name = "beacon-tunnel-db"
 database_id = "c17b4997-81f9-458b-bc7d-07369726f5eb"
 
-[[durable_objects.bindings]]
-name = "TG_VERIFY_DO"
-class_name = "TGVerifyDO"
-
-[[migrations]]
-tag = "v1"
-new_classes = ["TGVerifyDO"]
-
 [[migrations]]
 tag = "v2"
 new_classes = ["StateStore"]
