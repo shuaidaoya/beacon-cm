@@ -209,7 +209,7 @@ function 格式化字节(b) { if (!b || b <= 0) return '0 B'; const k = 1024, u 
 async function 同步在线人数() {
 	try { await env_global?.KV?.put('sys:global:active', JSON.stringify({ count: 活跃用户Map.size, ts: Date.now() })); } catch(e) {}
 }
-const 全局流量KV键 = 'sys:global:traffic';
+// 全站流量统计：D1 单一权威，避免 KV read-modify-write 竞态。
 async function 读取全局流量() {
 	try {
 		if (DB实例) {
@@ -217,34 +217,7 @@ async function 读取全局流量() {
 			if (row) return { up: row.up_bytes || 0, down: row.down_bytes || 0 };
 		}
 	} catch(e) {}
-	try {
-		const text = await env_global?.KV?.get(全局流量KV键);
-		if (text) { const d = JSON.parse(text); return { up: d.up || 0, down: d.down || 0 }; }
-	} catch(e) {}
 	return { up: 0, down: 0 };
-}
-async function 累加全局流量(upBytes, downBytes) {
-	// D1 累加（建表后重试）
-	if (DB实例) {
-		let ok = false;
-		try {
-			await DB实例.prepare('INSERT OR REPLACE INTO global_traffic (id, up_bytes, down_bytes) VALUES (1, COALESCE((SELECT up_bytes FROM global_traffic WHERE id=1),0)+?1, COALESCE((SELECT down_bytes FROM global_traffic WHERE id=1),0)+?2)').bind(upBytes||0, downBytes||0).run();
-			ok = true;
-		} catch(e) {
-			try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS global_traffic (id INTEGER PRIMARY KEY, up_bytes INTEGER DEFAULT 0, down_bytes INTEGER DEFAULT 0)').run(); } catch(e2) {}
-			if (!ok) {
-				try { await DB实例.prepare('INSERT OR REPLACE INTO global_traffic (id, up_bytes, down_bytes) VALUES (1, COALESCE((SELECT up_bytes FROM global_traffic WHERE id=1),0)+?1, COALESCE((SELECT down_bytes FROM global_traffic WHERE id=1),0)+?2)').bind(upBytes||0, downBytes||0).run(); } catch(e3) {}
-			}
-		}
-	}
-	try {
-		const key = 全局流量KV键;
-		const text = await env_global?.KV?.get(key);
-		const current = text ? JSON.parse(text) : { up: 0, down: 0 };
-		current.up = (current.up || 0) + (upBytes || 0);
-		current.down = (current.down || 0) + (downBytes || 0);
-		await env_global?.KV?.put(key, JSON.stringify(current));
-	} catch(e) {}
 }
 async function 读取当天流量() {
 	const today = new Date(Date.now() + 8*3600*1000).toISOString().slice(0, 10);
@@ -254,34 +227,21 @@ async function 读取当天流量() {
 			if (row) return { up: row.up_bytes || 0, down: row.down_bytes || 0 };
 		}
 	} catch(e) {}
-	try {
-		const text = await env_global?.KV?.get('sys:daily:traffic:' + today);
-		if (text) { const d = JSON.parse(text); return { up: d.up || 0, down: d.down || 0 }; }
-	} catch(e) {}
 	return { up: 0, down: 0 };
 }
-async function 累加当天流量(upBytes, downBytes) {
-	const today = new Date(Date.now() + 8*3600*1000).toISOString().slice(0, 10);
-	if (DB实例) {
-		let ok = false;
-		try {
-			await DB实例.prepare('INSERT INTO daily_traffic (date, up_bytes, down_bytes) VALUES (?1, ?2, ?3) ON CONFLICT(date) DO UPDATE SET up_bytes=up_bytes+?2, down_bytes=down_bytes+?3').bind(today, upBytes||0, downBytes||0).run();
-			ok = true;
-		} catch(e) {
-			try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS daily_traffic (date TEXT PRIMARY KEY, up_bytes INTEGER DEFAULT 0, down_bytes INTEGER DEFAULT 0)').run(); } catch(e2) {}
-			if (!ok) {
-				try { await DB实例.prepare('INSERT INTO daily_traffic (date, up_bytes, down_bytes) VALUES (?1, ?2, ?3) ON CONFLICT(date) DO UPDATE SET up_bytes=up_bytes+?2, down_bytes=down_bytes+?3').bind(today, upBytes||0, downBytes||0).run(); } catch(e3) {}
-			}
-		}
-	}
-	try {
-		const kvKey = 'sys:daily:traffic:' + today;
-		const text = await env_global?.KV?.get(kvKey);
-		const current = text ? JSON.parse(text) : { up: 0, down: 0 };
-		current.up = (current.up || 0) + (upBytes || 0);
-		current.down = (current.down || 0) + (downBytes || 0);
-		await env_global?.KV?.put(kvKey, JSON.stringify(current));
-	} catch(e) {}
+// 全站累加内存池：与 流量累加池 同周期 flush，消除 per-chunk D1/KV 写入。
+// ponytail: isolate 回收最坏丢一个 flush 窗口的数据；scheduled + 每请求触发已是双保险。
+const 全站累加池 = { up: 0, down: 0, dayKey: '', dayUp: 0, dayDown: 0 };
+function 当日键() { return new Date(Date.now() + 8*3600*1000).toISOString().slice(0, 10); }
+function 批量累加全站(upBytes, downBytes) {
+	const up = Number(upBytes || 0), down = Number(downBytes || 0);
+	if (up <= 0 && down <= 0) return;
+	全站累加池.up += up > 0 ? up : 0;
+	全站累加池.down += down > 0 ? down : 0;
+	const today = 当日键();
+	if (全站累加池.dayKey !== today) { 全站累加池.dayKey = today; 全站累加池.dayUp = 0; 全站累加池.dayDown = 0; }
+	全站累加池.dayUp += up > 0 ? up : 0;
+	全站累加池.dayDown += down > 0 ? down : 0;
 }
 
 function 失效用户缓存(uuid) {
@@ -324,14 +284,16 @@ function 批量累加流量(uuid, bytes) {
 	流量累加池.set(uuid, (流量累加池.get(uuid) || 0) + bytes);
 }
 async function 批量刷写流量() {
-	if (流量累加池.size === 0) return;
+	const hasUser = 流量累加池.size > 0;
+	const hasGlobal = (全站累加池.up > 0 || 全站累加池.down > 0 || 全站累加池.dayUp > 0 || 全站累加池.dayDown > 0);
+	if (!hasUser && !hasGlobal) return;
 	const now = Date.now();
 	if (now - 上次流量刷写时间 < 60000 && 流量累加池.size < 50) return;
 	上次流量刷写时间 = now;
 	const entries = [...流量累加池.entries()];
 	流量累加池.clear();
 	for (const [u] of entries) 失效用户缓存(u);
-	if (DB实例) {
+	if (DB实例 && entries.length) {
 		try {
 			await DB实例.batch(entries.map(([u, b]) =>
 				DB实例.prepare('UPDATE users SET used_traffic=used_traffic+? WHERE uuid=?').bind(b, u)
@@ -361,6 +323,47 @@ async function 批量刷写流量() {
 			}
 		}
 	} catch {}
+	// 全站累计 flush：D1 原子 UPSERT，失败回滚到内存池。
+	const gUp = 全站累加池.up, gDown = 全站累加池.down;
+	const dDay = 全站累加池.dayKey, dUp = 全站累加池.dayUp, dDown = 全站累加池.dayDown;
+	全站累加池.up = 0; 全站累加池.down = 0; 全站累加池.dayUp = 0; 全站累加池.dayDown = 0;
+	if (DB实例 && (gUp > 0 || gDown > 0)) {
+		try {
+			await DB实例.prepare(
+				'INSERT INTO global_traffic (id, up_bytes, down_bytes) VALUES (1, ?1, ?2) ' +
+				'ON CONFLICT(id) DO UPDATE SET up_bytes=up_bytes+?1, down_bytes=down_bytes+?2'
+			).bind(gUp, gDown).run();
+		} catch(e) {
+			try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS global_traffic (id INTEGER PRIMARY KEY, up_bytes INTEGER DEFAULT 0, down_bytes INTEGER DEFAULT 0)').run(); } catch(_) {}
+			try {
+				await DB实例.prepare(
+					'INSERT INTO global_traffic (id, up_bytes, down_bytes) VALUES (1, ?1, ?2) ' +
+					'ON CONFLICT(id) DO UPDATE SET up_bytes=up_bytes+?1, down_bytes=down_bytes+?2'
+				).bind(gUp, gDown).run();
+			} catch(_) {
+				全站累加池.up += gUp; 全站累加池.down += gDown;
+			}
+		}
+	}
+	if (DB实例 && dDay && (dUp > 0 || dDown > 0)) {
+		try {
+			await DB实例.prepare(
+				'INSERT INTO daily_traffic (date, up_bytes, down_bytes) VALUES (?1, ?2, ?3) ' +
+				'ON CONFLICT(date) DO UPDATE SET up_bytes=up_bytes+?2, down_bytes=down_bytes+?3'
+			).bind(dDay, dUp, dDown).run();
+		} catch(e) {
+			try { await DB实例.prepare('CREATE TABLE IF NOT EXISTS daily_traffic (date TEXT PRIMARY KEY, up_bytes INTEGER DEFAULT 0, down_bytes INTEGER DEFAULT 0)').run(); } catch(_) {}
+			try {
+				await DB实例.prepare(
+					'INSERT INTO daily_traffic (date, up_bytes, down_bytes) VALUES (?1, ?2, ?3) ' +
+					'ON CONFLICT(date) DO UPDATE SET up_bytes=up_bytes+?2, down_bytes=down_bytes+?3'
+				).bind(dDay, dUp, dDown).run();
+			} catch(_) {
+				if (全站累加池.dayKey !== dDay) { 全站累加池.dayKey = dDay; }
+				全站累加池.dayUp += dUp; 全站累加池.dayDown += dDown;
+			}
+		}
+	}
 }
 let env_global = null; // set in fetch handler for KV fallback in flush
 async function 确保D1用户表() {
@@ -2387,6 +2390,7 @@ if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
 						const 流量用户 = 请求订阅用户 || 订阅用户;
 						if (流量用户?.uuid && 订阅内容) {
 							const 字节数 = new TextEncoder().encode(订阅内容).length;
+							批量累加全站(0, 字节数); // 订阅下发计入全站下行
 							ctx.waitUntil(增加用户已用流量(流量用户.uuid, 字节数));
 						}
 						return new Response(订阅内容, { status: 200, headers: responseHeaders });
@@ -2434,6 +2438,8 @@ if (访问路径 === 'register/user' || 访问路径 === 'register/user/') {
 		return new Response(await nginx(), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
 	},
 	async scheduled(controller, env, ctx) {
+		// 流量统计 flush：cron 兜底，防止空闲 isolate 长时间未触发请求导致内存累计丢失。
+		try { 初始化D1(env); env_global = env; ctx.waitUntil(批量刷写流量()); } catch(e) {}
 		try {
 			const 安全运行时 = await 创建安全运行时(env);
 			const config = await 读取安全配置(env, 安全运行时);
@@ -2563,6 +2569,7 @@ async function 处理XHTTP请求(request, yourUUID) {
 					const { done, value } = await reader.read();
 					if (done) break;
 					if (!value || value.byteLength === 0) continue;
+					批量累加全站(value.byteLength, 0); // XHTTP 上行全站统计
 					if (当前流量UUID) 批量累加流量(当前流量UUID, value.byteLength);
 					if (首包.isUDP) {
 						await forwardataudp(value, xhttpBridge, udpRespHeader);
@@ -2925,11 +2932,13 @@ async function 处理gRPC请求(request, yourUUID) {
 						}
 						if (!payload.byteLength) continue;
 						if (isDnsQuery) {
+							批量累加全站(payload.byteLength, 0); // gRPC DNS 上行
 							if (当前流量UUID) 批量累加流量(当前流量UUID, payload.byteLength);
 							await forwardataudp(payload, grpcBridge, null);
 							continue;
 						}
 						if (remoteConnWrapper.socket) {
+							批量累加全站(payload.byteLength, 0); // gRPC 已建立连接的上行
 							if (当前流量UUID) 批量累加流量(当前流量UUID, payload.byteLength);
 							if (!(await 写入远端(payload))) throw new Error('Remote socket is not ready');
 						} else {
@@ -2945,6 +2954,7 @@ async function 处理gRPC请求(request, yourUUID) {
 								const 命中节点UUID = await 安全通过木马密码获取UUID(安全运行时, 默认节点UUID, 解析结果.passwordHash);
 								if (!命中节点UUID) throw new Error('Invalid trojan request');
 								当前流量UUID = 命中节点UUID;
+								批量累加全站(payload.byteLength, 0); // gRPC 木马首包上行
 								批量累加流量(当前流量UUID, payload.byteLength);
 								const { port, hostname, rawClientData } = 解析结果;
 								//log(`[gRPC] 木马首包: ${hostname}:${port}`);
@@ -2955,6 +2965,7 @@ async function 处理gRPC请求(request, yourUUID) {
 								if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid vless request');
 								if (!(await 安全是否允许节点UUID(安全运行时, 默认节点UUID, 解析结果.clientUUID))) throw new Error('Invalid vless request');
 								当前流量UUID = 解析结果.clientUUID;
+								批量累加全站(payload.byteLength, 0); // gRPC vless 首包上行
 								批量累加流量(当前流量UUID, payload.byteLength);
 								const { port, hostname, rawIndex, version, isUDP } = 解析结果;
 								//log(`[gRPC] 魏烈思首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
@@ -3338,7 +3349,7 @@ async function 处理WS请求(request, yourUUID, url) {
 
 	readable.pipeTo(new WritableStream({
 		async write(chunk) {
-				(async () => { try { await 累加全局流量(chunk.byteLength, 0); await 累加当天流量(chunk.byteLength, 0); } catch(e) {} })();
+			批量累加全站(chunk.byteLength, 0); // upstream global counting (in-memory, flushed in batch)
 			当前流量UUID && 批量累加流量(当前流量UUID, chunk.byteLength); // upstream counting
 			if (isDnsQuery) return await forwardataudp(chunk, serverSock, null);
 			if (判断协议类型 === 'ss') {
@@ -3778,6 +3789,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, us
 				const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
 				hasData = true;
 				连接累计字节 += chunk.byteLength;
+				批量累加全站(0, chunk.byteLength); // non-BYOB 下行全站统计
 				if (userUUID) 批量累加流量(userUUID, chunk.byteLength);
 				await 发送块(chunk);
 			}
@@ -3807,7 +3819,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, us
 				mainBuf = value.buffer;
 				const len = value.byteLength;
 				连接累计字节 += len;
-				(async () => { try { await 累加全局流量(0, len); await 累加当天流量(0, len); } catch(e) {} })();
+				批量累加全站(0, len); // downstream global counting (in-memory, flushed in batch)
 				if (userUUID) 批量累加流量(userUUID, len);
 
 				if (value.byteOffset !== offset) {
@@ -3836,12 +3848,9 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, us
 			await flush();
 			if (flush定时器) { clearTimeout(flush定时器); flush定时器 = null }
 		}
-	} catch (err) { closeSocketQuietly(webSocket) }
+		} catch (err) { closeSocketQuietly(webSocket) }
 	finally { try { reader.cancel() } catch (e) { } try { reader.releaseLock() } catch (e) { } if (心跳定时器) clearInterval(心跳定时器); }
-	// beacon-tunnel 对齐：直接 D1 更新 + 批量刷写
-	if (userUUID && 连接累计字节 > 0) {
-		await 增加用户已用流量(userUUID, 连接累计字节);
-	}
+	// 下行字节已在读取循环中通过 批量累加流量 入池；此处不再重复写入 used_traffic。
 	if (!hasData && retryFunc) await retryFunc();
 }
 
